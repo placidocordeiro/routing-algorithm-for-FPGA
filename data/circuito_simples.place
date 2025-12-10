@@ -1,0 +1,9 @@
+Netlist_File: circuito_simples.net Netlist_ID: SHA256:baa838120e7019bc86d2bd0b529fcf45135ea4a61c1e17f3e86417ffb51db545
+Array size: 3 x 3 logic blocks
+
+#block name	x	y	subblk	layer	block number
+#----------	--	--	------	-----	------------
+y		1	1	0	0	#0
+out:y		1	2	1	0	#1
+a		2	1	3	0	#2
+b		2	1	6	0	#3
