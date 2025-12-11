@@ -10,28 +10,27 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(MSVC)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /W4")
 else()
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wpedantic")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wpedantic -O2")
 endif()
 
 # Find required packages
 find_package(tinyxml2 REQUIRED)
 
-# Include directories
-include_directories(${CMAKE_SOURCE_DIR}/src)
+include_directories(${CMAKE_SOURCE_DIR}/include)
 
 # Source files
 set(SOURCES
     src/main.cpp
+    src/architecture/parser.cpp
+    src/netlist/parser.cpp
+    src/placement/parser.cpp
+    src/routing/graph_builder.cpp
 )
 
 # Main executable
 add_executable(fpga_router ${SOURCES})
 
-# Link libraries
-target_link_libraries(fpga_router 
-    PRIVATE 
-        tinyxml2::tinyxml2
-)
+target_link_libraries(fpga_router PRIVATE tinyxml2::tinyxml2)
 
 # Output directory
 set_target_properties(fpga_router PROPERTIES
@@ -41,10 +40,7 @@ set_target_properties(fpga_router PROPERTIES
 # Create output directories
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# Installation targets
-install(TARGETS fpga_router 
-    RUNTIME DESTINATION bin
-)
+install(TARGETS fpga_router RUNTIME DESTINATION bin)
 
 # Print configuration info
 message(STATUS "=== FPGA Router Configuration ===")
