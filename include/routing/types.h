@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <set>
 
 // Tipos de nós do RRGraph
 enum class RRNodeType {
@@ -22,9 +23,11 @@ struct RRNode {
     int id;
     RRNodeType type;
     int x, y;
-    int x_low, y_low, x_high, y_high;  // Para segmentos
-    int ptc;  // Pin ou track class
+    int x_low, y_low, x_high, y_high;
+    int ptc;
     int capacity;
+    int used;  // Quantas nets usando este nó
+    float base_cost;
     float delay;
     std::string name;
 };
@@ -38,9 +41,9 @@ struct RREdge {
 
 struct TimingConstraints {
     float clock_period;
-    std::map<int, float> arrival_times;  // node_id -> arrival_time
-    std::map<int, float> required_times; // node_id -> required_time
-    std::map<int, float> slacks;         // node_id -> slack
+    std::map<int, float> arrival_times;
+    std::map<int, float> required_times;
+    std::map<int, float> slacks;
 };
 
 struct RoutingGraph {
@@ -60,6 +63,27 @@ struct RoutingGraph {
         adjacency_list[edge.from_node].push_back(edge.to_node);
         reverse_adjacency[edge.to_node].push_back(edge.from_node);
     }
+    
+    // Novo: obter nós adjacentes
+    const std::vector<int>& getNeighbors(int node_id) const {
+        static const std::vector<int> empty;
+        auto it = adjacency_list.find(node_id);
+        return it != adjacency_list.end() ? it->second : empty;
+    }
+    
+    // Novo: resetar uso
+    void resetUsage() {
+        for (auto& node : nodes) {
+            node.used = 0;
+        }
+    }
+};
+
+struct RouteTree {
+    int net_id;
+    std::vector<int> nodes;  // IDs dos nós usados na rota
+    float total_delay;
+    bool routed;
 };
 
 #endif

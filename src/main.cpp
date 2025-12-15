@@ -4,51 +4,50 @@
 #include "netlist/parser.h"
 #include "placement/parser.h"
 #include "routing/graph_builder.h"
+#include "routing/router.h"
 
 namespace fs = std::filesystem;
 
 int main() {
     std::string data_dir = "../data";
     
-    if (!fs::exists(data_dir)) {
-        std::cerr << "Directory not found: " << data_dir << std::endl;
-        return 1;
-    }
+    auto fpga_arch = parse_architecture_xml(data_dir + "/k6_frac_N10_mem32K_40nm.xml");
+    auto nets = read_net_file(data_dir + "/circuito_simples.net");
+    auto placements = read_place_file(data_dir + "/circuito_simples.place");
     
-    std::string arch_file = data_dir + "/k6_frac_N10_mem32K_40nm.xml";
-    std::string net_file = data_dir + "/circuito_simples.net";
-    std::string place_file = data_dir + "/circuito_simples.place";
-    
-    if (!fs::exists(arch_file) || !fs::exists(net_file) || !fs::exists(place_file)) {
-        std::cerr << "Missing required files" << std::endl;
-        return 1;
-    }
-    
-    // Parsear arquivos
-    auto fpga_arch = parse_architecture_xml(arch_file);
-    auto nets = read_net_file(net_file);
-    auto placements = read_place_file(place_file);
-    
-    // Construir grafo de roteamento
+    // 1. Construir grafo
     RoutingGraphBuilder builder;
     RoutingGraph rr_graph = builder.buildGraph(fpga_arch, nets, placements);
     
-    // Imprimir estatísticas
-    std::cout << "\n====== FINAL STATISTICS ======\n";
-    std::cout << "RR Graph Nodes: " << rr_graph.nodes.size() << "\n";
-    std::cout << "RR Graph Edges: " << rr_graph.edges.size() << "\n";
-    std::cout << "Nets: " << nets.size() << "\n";
-    std::cout << "Placements: " << placements.size() << "\n";
+    // 2. Mapear nets para nós físicos
+    std::vector<Net> physical_nets;
+    builder.mapNetsToPhysicalNodes(nets, placements, fpga_arch, physical_nets, rr_graph);
     
-    // Imprimir primeiros 10 nós
-    std::cout << "\nFirst 10 RR Nodes:\n";
-    for (int i = 0; i < std::min(10, (int)rr_graph.nodes.size()); ++i) {
-        const auto& node = rr_graph.nodes[i];
-        std::cout << "  Node " << node.id << ": " << node.name 
-                  << " (Type: " << (int)node.type 
-                  << ", Pos: " << node.x << "," << node.y 
-                  << ", Delay: " << node.delay << ")\n";
+    // 3. Executar routing
+    Router router;
+    auto routes = router.route(rr_graph, physical_nets);
+    
+    // 4. Estatísticas
+    std::cout << "\n====== RESULTADOS DO ROUTING ======\n";
+    int routed_nets = 0;
+    float total_delay = 0.0f;
+    
+    for (const auto& route : routes) {
+        if (route.routed) {
+            routed_nets++;
+            total_delay += route.total_delay;
+            std::cout << "Net " << route.net_id 
+                      << ": " << route.nodes.size() << " nós"
+                      << ", delay: " << route.total_delay << " ns\n";
+        }
     }
+    
+    std::cout << "\nEstatísticas:\n";
+    std::cout << "Nets totais: " << nets.size() << "\n";
+    std::cout << "Nets roteadas: " << routed_nets << "\n";
+    std::cout << "Delay total: " << total_delay << " ns\n";
+    std::cout << "Delay médio por net: " 
+              << (routed_nets > 0 ? total_delay / routed_nets : 0) << " ns\n";
     
     return 0;
 }

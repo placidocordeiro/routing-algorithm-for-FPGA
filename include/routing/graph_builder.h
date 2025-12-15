@@ -18,6 +18,14 @@ public:
         const std::vector<Net>& nets,
         const std::vector<Placement>& placements
     );
+
+    void mapNetsToPhysicalNodes(
+        const std::vector<Net>& logical_nets,
+        const std::vector<Placement>& placements,
+        const FPGAArchitecture& arch,
+        std::vector<Net>& physical_nets,
+        RoutingGraph& graph
+    );
     
 private:
     // Métodos auxiliares
@@ -46,14 +54,11 @@ private:
         RoutingGraph& graph
     );
     
-    void mapNetsToPhysicalNodes(
-        const std::vector<Net>& logical_nets,
-        const std::vector<Placement>& placements,
-        const FPGAArchitecture& arch,
-        std::vector<Net>& physical_nets,
-        RoutingGraph& graph
+    void createTestNodes(
+        RoutingGraph& graph,
+        const std::vector<Net>& nets
     );
-    
+
     // Mapeamentos auxiliares
     std::map<std::tuple<int, int, std::string, std::string>, int> pin_node_map_;  
     // (x, y, tile_type, pin_name) -> node_id

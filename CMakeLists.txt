@@ -25,6 +25,7 @@ set(SOURCES
     src/netlist/parser.cpp
     src/placement/parser.cpp
     src/routing/graph_builder.cpp
+    src/routing/router.cpp
 )
 
 # Main executable
