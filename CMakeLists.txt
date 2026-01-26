@@ -26,6 +26,7 @@ set(SOURCES
     src/placement/parser.cpp
     src/routing/graph_builder.cpp
     src/routing/router.cpp
+    src/validation/validate.cpp
 )
 
 # Main executable

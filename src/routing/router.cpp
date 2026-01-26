@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include <iostream>
 #include <algorithm>
+#include <cassert>
 
 struct DijkstraNode {
     int id;
@@ -139,10 +140,13 @@ std::vector<int> Router::findPath(
 }
 
 float Router::getNodeCost(const RRNode& node, float criticality) {
+    assert(criticality >= 0.0f && criticality <= 1.0f);
+    assert(node.capacity > 0);
     // Custo base + penalidade por congestionamento
     float base_cost = node.base_cost > 0 ? node.base_cost : 1.0f;
     float congestion_cost = 1.0f + node.used;
     
+    assert(congestion_cost >= 0.0f);
     // Balanceamento timing/congestionamento
     return (criticality * node.delay) + ((1.0f - criticality) * base_cost * congestion_cost);
 }

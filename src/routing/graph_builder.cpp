@@ -2,12 +2,15 @@
 #include <iostream>
 #include <sstream>
 #include <cmath>
+#include <cassert>
 
 RoutingGraph RoutingGraphBuilder::buildGraph(
     const FPGAArchitecture& arch,
     const std::vector<Net>& nets,
     const std::vector<Placement>& placements
 ) {
+    assert(!arch.tiles.empty());
+
     RoutingGraph graph;
     
     // 1. Criar nós fictícios para teste

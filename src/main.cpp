@@ -5,6 +5,7 @@
 #include "placement/parser.h"
 #include "routing/graph_builder.h"
 #include "routing/router.h"
+#include "validation/validate.h"
 
 namespace fs = std::filesystem;
 
@@ -15,19 +16,30 @@ int main() {
     auto nets = read_net_file(data_dir + "/circuito_simples.net");
     auto placements = read_place_file(data_dir + "/circuito_simples.place");
     
-    // 1. Construir grafo
+    // construir grafo
     RoutingGraphBuilder builder;
     RoutingGraph rr_graph = builder.buildGraph(fpga_arch, nets, placements);
     
-    // 2. Mapear nets para nós físicos
+    // mapear nets para nós físicos
     std::vector<Net> physical_nets;
     builder.mapNetsToPhysicalNodes(nets, placements, fpga_arch, physical_nets, rr_graph);
     
-    // 3. Executar routing
+    // executar routing
     Router router;
     auto routes = router.route(rr_graph, physical_nets);
+
+    std::cout << "\n====== VALIDACAO ======\n";
+    auto val_stats = Validator::validateRouting(rr_graph, routes, physical_nets);
     
-    // 4. Estatísticas
+    if (val_stats.is_valid) {
+        std::cout << "SUCESSO: Roteamento valido e legal!\n";
+    } else {
+        std::cout << "ERRO: O roteamento possui conflitos ou falhas.\n";
+        std::cout << "- Nos com congestionamento: " << val_stats.overused_nodes << "\n";
+        std::cout << "- Caminhos descontínuos: " << val_stats.disconnected_paths << "\n";
+    }
+    
+    // estatísticas
     std::cout << "\n====== RESULTADOS DO ROUTING ======\n";
     int routed_nets = 0;
     float total_delay = 0.0f;
