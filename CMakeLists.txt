@@ -27,6 +27,7 @@ set(SOURCES
     src/routing/graph_builder.cpp
     src/routing/router.cpp
     src/validation/validate.cpp
+    src/routing/brkga.cpp
 )
 
 # Main executable
