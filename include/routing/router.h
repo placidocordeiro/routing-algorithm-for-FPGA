@@ -11,7 +11,8 @@ public:
     // Algoritmo de routing básico
     std::vector<RouteTree> route(
         const RoutingGraph& graph,
-        const std::vector<Net>& nets
+        const std::vector<Net>& nets,
+        const std::vector<int>& net_order
     );
     
 private:
