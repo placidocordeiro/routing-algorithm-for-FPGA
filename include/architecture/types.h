@@ -4,6 +4,33 @@
 #include <string>
 #include <vector>
 
+struct Mode
+{
+    std::string name;
+};
+
+struct PBType
+{
+    std::string name;
+    std::string input;
+    std::string output;
+};
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 struct Switch {
     std::string type, name;
     double R, Cin, Cout, Tdel, mux_trans_size, buf_size;
@@ -18,7 +45,7 @@ struct Segment {
 };
 
 struct Direct {
-    std::string name, from_pin, to_pin;
+    std::string name, input, output;
     int x_offset, y_offset, z_offset;
 };
 

@@ -87,8 +87,8 @@ FPGAArchitecture parse_architecture_xml(const std::string& filename) {
             if (std::string(elem->Name()) == "direct") {
                 Direct dir;
                 dir.name = elem->Attribute("name") ? elem->Attribute("name") : "";
-                dir.from_pin = elem->Attribute("from_pin") ? elem->Attribute("from_pin") : "";
-                dir.to_pin = elem->Attribute("to_pin") ? elem->Attribute("to_pin") : "";
+                dir.input = elem->Attribute("input") ? elem->Attribute("input") : "";
+                dir.output = elem->Attribute("output") ? elem->Attribute("output") : "";
                 dir.x_offset = elem->IntAttribute("x_offset", 0);
                 dir.y_offset = elem->IntAttribute("y_offset", 0);
                 dir.z_offset = elem->IntAttribute("z_offset", 0);
