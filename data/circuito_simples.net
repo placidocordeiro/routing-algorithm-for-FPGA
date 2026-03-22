@@ -1,5 +1,5 @@
 <?xml version="1.0"?>
-<block name="circuito_simples.net" instance="FPGA_packed_netlist[0]" architecture_id="SHA256:01d513d8084e3a099f7941ee2b99eb23ac55b6df6f717dad9585de8a8736b179" atom_netlist_id="SHA256:6e0d76e73fb175c0f5814a24e73c75c620826386b6c63f7b9fafa0e66fb56f33">
+<block name="teste/circuito_simples.net" instance="FPGA_packed_netlist[0]" architecture_id="SHA256:01d513d8084e3a099f7941ee2b99eb23ac55b6df6f717dad9585de8a8736b179" atom_netlist_id="SHA256:3b49df9f4fcc9731605a990dd1cb396384b771814f15c458939bdf58abf86ca3">
 	<inputs>y x</inputs>
 	<outputs>out:out</outputs>
 	<clocks></clocks>

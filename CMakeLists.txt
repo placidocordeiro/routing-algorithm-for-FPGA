@@ -1,56 +1,127 @@
-cmake_minimum_required(VERSION 3.12)
-project(FPGARouter VERSION 1.0.0 LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.16)
+project(routing_fpga CXX)
 
-# C++ Standard
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Compiler flags
-if(MSVC)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /W4")
-else()
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wpedantic -O2")
-endif()
+# ==============================================================================
+# Caminhos base do VTR
+# ==============================================================================
 
-# Find required packages
-find_package(tinyxml2 REQUIRED)
+set(VTR_ROOT  "${CMAKE_SOURCE_DIR}/vtr")
+set(VTR_BUILD "${VTR_ROOT}/build")
+set(VTR_LIBS  "${VTR_BUILD}/libs")
+set(VTR_EXT   "${VTR_LIBS}/EXTERNAL")
 
-include_directories(${CMAKE_SOURCE_DIR}/include)
+# ==============================================================================
+# Headers
+# ==============================================================================
 
-# Source files
-set(SOURCES
+set(VTR_INCLUDE_DIRS
+    # Arquitetura
+    "${VTR_ROOT}/libs/libarchfpga/src"
+
+    # Utilitários
+    "${VTR_ROOT}/libs/libvtrutil/src"
+    "${VTR_ROOT}/libs/libpugiutil/src"
+    "${VTR_ROOT}/libs/EXTERNAL/libpugixml/src"
+    "${VTR_ROOT}/libs/EXTERNAL/libargparse/src"
+    "${VTR_ROOT}/vpr/src/pack"
+    "${VTR_ROOT}/libs/EXTERNAL/libtatum/libtatum/"
+    "${VTR_ROOT}/vpr/src/power/"
+    "${VTR_ROOT}/vpr/src/noc/"
+    "${VTR_ROOT}/vpr/src/server/"
+    "${VTR_ROOT}/libs/EXTERNAL/sockpp/include/"
+    "${VTR_ROOT}/vpr/src/timing/"
+
+    # Grafo de roteamento
+    "${VTR_ROOT}/libs/librrgraph/src/base"
+
+    # Netlist
+    "${VTR_ROOT}/libs/libnetlist/src"
+
+    # VPR (API, tipos, contexto global)
+    "${VTR_ROOT}/vpr/src/base"
+    "${VTR_ROOT}/vpr/src/route"
+    "${VTR_ROOT}/vpr/src/place"
+    "${VTR_ROOT}/vpr/src/util"
+
+    # Headers gerados pelo build
+    "${VTR_BUILD}/libs/libvtrutil"
+    "${VTR_BUILD}/vpr"
+)
+
+# ==============================================================================
+# Libs pré-compiladas (compiladas uma única vez em vtr/build)
+# ==============================================================================
+
+set(VTR_LIB_VPR       "${VTR_BUILD}/vpr/libvpr.a")
+set(VTR_LIB_RRGRAPH   "${VTR_LIBS}/librrgraph/librrgraph.a")
+set(VTR_LIB_ARCHFPGA  "${VTR_LIBS}/libarchfpga/libarchfpga.a")
+set(VTR_LIB_VTRUTIL   "${VTR_LIBS}/libvtrutil/libvtrutil.a")
+set(VTR_LIB_PUGIUTIL  "${VTR_LIBS}/libpugiutil/libpugiutil.a")
+set(VTR_LIB_PUGIXML   "${VTR_EXT}/libpugixml/libpugixml.a")
+set(VTR_LIB_LOG       "${VTR_LIBS}/liblog/liblog.a")
+set(VTR_LIB_ARGPARSE  "${VTR_EXT}/libargparse/libargparse.a")
+set(VTR_LIB_TATUM     "${VTR_EXT}/libtatum/libtatum/libtatum.a")
+set(VTR_LIB_CAPNP     "${VTR_EXT}/capnproto/c++/src/capnp/libcapnp.a")
+set(VTR_LIB_KJ        "${VTR_EXT}/capnproto/c++/src/kj/libkj.a")
+set(VTR_LIB_CAPNPROTO "${VTR_LIBS}/libvtrcapnproto/liblibvtrcapnproto.a")
+set(VTR_LIB_SDCPARSE  "${VTR_EXT}/libsdcparse/libsdcparse.a")
+set(VTR_LIB_BLIFPARSE "${VTR_EXT}/libblifparse/libblifparse.a")
+
+set(VTR_ALL_LIBS
+    ${VTR_LIB_VPR}
+    ${VTR_LIB_RRGRAPH}
+    ${VTR_LIB_ARCHFPGA}
+    ${VTR_LIB_VTRUTIL}
+    ${VTR_LIB_PUGIUTIL}
+    ${VTR_LIB_PUGIXML}
+    ${VTR_LIB_LOG}
+    ${VTR_LIB_ARGPARSE}
+    ${VTR_LIB_TATUM}
+    ${VTR_LIB_CAPNPROTO}
+    ${VTR_LIB_CAPNP}
+    ${VTR_LIB_KJ}
+    ${VTR_LIB_SDCPARSE}
+    ${VTR_LIB_BLIFPARSE}
+)
+# Verifica existência de todas as libs antes de prosseguir
+foreach(lib ${VTR_ALL_LIBS})
+    if(NOT EXISTS ${lib})
+        message(FATAL_ERROR
+            "Lib não encontrada: ${lib}\n"
+            "Compile o VTR primeiro:\n"
+            "  cd vtr/build\n"
+            "  make vpr librrgraph libarchfpga libvtrutil libpugiutil liblog -j\$(nproc)"
+        )
+    endif()
+endforeach()
+
+# ==============================================================================
+# Dependências do sistema
+# ==============================================================================
+
+find_package(Threads REQUIRED)
+
+# ==============================================================================
+# Targets
+# ==============================================================================
+
+add_executable(fpga_router
     src/main.cpp
-    src/architecture/parser.cpp
-    src/netlist/parser.cpp
-    src/placement/parser.cpp
-    src/routing/graph_builder.cpp
-    src/routing/router.cpp
-    src/validation/validate.cpp
-    src/routing/brkga.cpp
+    src/vpr_context/loader.cpp
 )
 
-# Main executable
-add_executable(fpga_router ${SOURCES})
 
-target_link_libraries(fpga_router PRIVATE tinyxml2::tinyxml2)
-
-# Output directory
-set_target_properties(fpga_router PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+target_include_directories(fpga_router PRIVATE
+    ${VTR_INCLUDE_DIRS}
+    "${CMAKE_SOURCE_DIR}/src"   # permite #include "vpr_context/loader.h"
 )
 
-# Create output directories
-file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-
-install(TARGETS fpga_router RUNTIME DESTINATION bin)
-
-# Print configuration info
-message(STATUS "=== FPGA Router Configuration ===")
-message(STATUS "Project: ${PROJECT_NAME}")
-message(STATUS "Version: ${PROJECT_VERSION}")
-message(STATUS "C++ Standard: ${CMAKE_CXX_STANDARD}")
-message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
-message(STATUS "tinyxml2 found: ${tinyxml2_FOUND}")
-message(STATUS "Output directory: ${CMAKE_BINARY_DIR}/bin")
-message(STATUS "====================================")
+target_link_libraries(fpga_router PRIVATE
+    ${VTR_ALL_LIBS}
+    Threads::Threads
+    dl
+    z
+)
