@@ -111,12 +111,16 @@ find_package(Threads REQUIRED)
 add_executable(fpga_router
     src/main.cpp
     src/vpr_context/loader.cpp
+    src/routing/geometry_utils.cpp
+    src/routing/path_finder.cpp
+    src/routing/steiner_router.cpp
 )
 
 
 target_include_directories(fpga_router PRIVATE
     ${VTR_INCLUDE_DIRS}
-    "${CMAKE_SOURCE_DIR}/src"   # permite #include "vpr_context/loader.h"
+    "${CMAKE_SOURCE_DIR}/include"    # permite #include "routing/..." headers
+    "${CMAKE_SOURCE_DIR}/src"        # permite #include "vpr_context/loader.h"
 )
 
 target_link_libraries(fpga_router PRIVATE

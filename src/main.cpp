@@ -1,6 +1,7 @@
 #include <iostream>
 #include "globals.h"
 #include "vpr_context/loader.h"
+#include "routing/steiner_router.h"
 
 int main(int argc, const char* argv[]) {
     if (argc < 5) {
@@ -26,9 +27,12 @@ int main(int argc, const char* argv[]) {
 
     std::cout << "Blocos : " << nlist.blocks().size() << "\n";
     std::cout << "Nets   : " << nlist.nets().size()   << "\n";
-    std::cout << "Nós RR : " << rr_graph.num_nodes()  << "\n";
+    std::cout << "Nós RR : " << rr_graph.nodes().size()  << "\n";
 
-    // === o algoritmo de roteamento entra aqui ===
+    // === Executar algoritmo de roteamento Steiner Tree ===
+    routing::SteinerRouter router(1.0f);  // congestion_weight = 1.0
+    auto routing_result = router.route(nlist, rr_graph);
+    routing_result.print_summary();
 
     vpr_free_all(arch, vpr_setup);
     return 0;
