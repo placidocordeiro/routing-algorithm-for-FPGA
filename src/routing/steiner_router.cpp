@@ -20,6 +20,49 @@ void RoutingResult::print_summary() const {
 SteinerRouter::SteinerRouter(float congestion_weight)
     : congestion_weight_(congestion_weight) {}
 
+void SteinerRouter::build_rr_node_index(const RRGraphView& rr_graph) {
+    rr_node_index_.clear();
+
+    for (RRNodeId node_id : rr_graph.nodes()) {
+        e_rr_type type = rr_graph.node_type(node_id);
+
+        // Indexar apenas OPIN e IPIN — os únicos que correspondem a pins físicos
+        if (type != OPIN && type != IPIN) continue;
+
+        int x   = rr_graph.node_xlow(node_id);
+        int y   = rr_graph.node_ylow(node_id);
+        int ptc = rr_graph.node_ptc_num(node_id);
+
+        rr_node_index_[{x, y, ptc, type}] = node_id;
+    }
+
+    std::cout << "RR node index built: " << rr_node_index_.size() << " OPIN/IPIN nodes indexed.\n";
+}
+
+RRNodeId SteinerRouter::find_rr_node_for_pin(
+    ClusterPinId pin_id,
+    const ClusteredNetlist& netlist,
+    const RRGraphView& rr_graph,
+    e_rr_type expected_type) const {
+
+    // Posição do bloco no chip
+    ClusterBlockId block_id = netlist.pin_block(pin_id);
+    auto& place_ctx = g_vpr_ctx.placement();
+    int x = place_ctx.block_locs()[block_id].loc.x;
+    int y = place_ctx.block_locs()[block_id].loc.y;
+
+    // Índice lógico do pin dentro do bloco
+    int pin_index = netlist.pin_logical_index(pin_id);
+
+    // Lookup direto no índice — O(log n) em vez de varredura linear
+    auto it = rr_node_index_.find({x, y, pin_index, expected_type});
+    if (it != rr_node_index_.end()) {
+        return it->second;
+    }
+
+    return RRNodeId::INVALID();
+}
+
 Point SteinerRouter::get_block_location(
     ClusterBlockId block_id,
     const ClusteredNetlist& netlist) const {
@@ -32,20 +75,17 @@ Point SteinerRouter::get_block_location(
 RRNodeId SteinerRouter::find_nearest_rr_node(
     const Point& location,
     const RRGraphView& rr_graph,
-    t_rr_type preferred_type) const {
+    e_rr_type preferred_type) const {
 
     RRNodeId best_node;
     float best_distance = std::numeric_limits<float>::max();
 
-    // Iteração simplificada sobre nós (idealmente teria indexação espacial)
     for (RRNodeId node_id : rr_graph.nodes()) {
-        if (rr_graph.node_type(node_id) != preferred_type) {
-            continue;
-        }
+        if (rr_graph.node_type(node_id) != preferred_type) continue;
 
-        // Placeholder: usar heurística baseada em tipo
-        // Em produção, seria necessário acessar coordenadas espaciais do nó
-        float distance = 0.0f;
+        float nx = static_cast<float>(rr_graph.node_xlow(node_id));
+        float ny = static_cast<float>(rr_graph.node_ylow(node_id));
+        float distance = std::abs(location.x - nx) + std::abs(location.y - ny);
 
         if (distance < best_distance) {
             best_distance = distance;
@@ -66,71 +106,53 @@ NetRoutingResult SteinerRouter::route_net(
     result.sinks_total = netlist.net_sinks(net_id).size();
     result.sinks_routed = 0;
 
-    // Obter driver pin
+    // Obter driver pin e mapear para o nó RR correto (OPIN)
     ClusterPinId driver_pin = netlist.net_driver(net_id);
     if (!driver_pin.is_valid()) {
         return result;
     }
 
-    // TODO: Obter nó RR correspondente ao pin driver
-    // Por enquanto, usar primeiro nó da netlist como proxy
-    RRNodeId source_node;
-    if (rr_graph.nodes().size() > 0) {
-        auto nodes = rr_graph.nodes();
-        if (!nodes.empty()) {
-            source_node = *nodes.begin();
-        }
-    }
-
+    RRNodeId source_node = find_rr_node_for_pin(driver_pin, netlist, rr_graph, OPIN);
     if (!source_node.is_valid()) {
+        std::cerr << "Aviso: nó RR não encontrado para driver da net " << size_t(net_id) << "\n";
         return result;
     }
 
     ClusterBlockId driver_block = netlist.pin_block(driver_pin);
     Point source_location = get_block_location(driver_block, netlist);
 
-    // Coletar sinks
+    // Coletar sinks — mapeando cada um para seu nó RR correto (IPIN)
     std::vector<Point> sink_locations;
-    std::vector<ClusterPinId> sink_pins;
     std::vector<RRNodeId> sink_nodes;
 
     for (ClusterPinId sink_pin : netlist.net_sinks(net_id)) {
+        RRNodeId sink_node = find_rr_node_for_pin(sink_pin, netlist, rr_graph, IPIN);
+        if (!sink_node.is_valid()) {
+            std::cerr << "Aviso: nó RR não encontrado para sink da net " << size_t(net_id) << "\n";
+            continue;
+        }
+
         ClusterBlockId sink_block = netlist.pin_block(sink_pin);
-        Point sink_loc = get_block_location(sink_block, netlist);
-
-        // TODO: Obter nó RR correspondente ao pin
-        RRNodeId sink_node;
-        if (rr_graph.nodes().size() > 0) {
-            auto nodes = rr_graph.nodes();
-            auto sink_nodes_it = nodes.begin();
-            std::advance(sink_nodes_it, sink_pins.size() % nodes.size());
-            sink_node = *sink_nodes_it;
-        }
-
-        if (sink_node.is_valid()) {
-            sink_locations.push_back(sink_loc);
-            sink_pins.push_back(sink_pin);
-            sink_nodes.push_back(sink_node);
-        }
+        sink_locations.push_back(get_block_location(sink_block, netlist));
+        sink_nodes.push_back(sink_node);
     }
 
     if (sink_nodes.empty()) {
         return result;
     }
 
-    // Encontrar ponto de Steiner
+    // Encontrar ponto de Steiner (hub geométrico central)
     Point steiner_point = find_steiner_point(source_location, sink_locations, 1.0f);
 
-    // Encontrar nó RRGraph mais próximo do ponto de Steiner
+    // Encontrar nó CHANX mais próximo do ponto de Steiner
     RRNodeId steiner_node = find_nearest_rr_node(steiner_point, rr_graph, CHANX);
     if (!steiner_node.is_valid()) {
-        steiner_node = source_node;  // Fallback
+        steiner_node = source_node;  // Fallback: partir direto da source
     }
 
-    // Usar path finder para rotear
+    // Rotear source -> cada sink via PathFinder (Dijkstra com congestionamento)
     PathFinder path_finder(rr_graph, congestion_map_);
 
-    // Conectar cada sink
     for (size_t i = 0; i < sink_nodes.size(); ++i) {
         PathFindingParams params;
         params.source = source_node;
@@ -159,9 +181,11 @@ RoutingResult SteinerRouter::route(
     result.nets_routed = 0;
     result.congestion_violations = 0;
 
+    // Construir índice espacial uma única vez antes de rotear
+    build_rr_node_index(rr_graph);
+
     std::cout << "Starting routing of " << result.total_nets << " nets...\n";
 
-    // Rotear cada net
     for (ClusterNetId net_id : netlist.nets()) {
         NetRoutingResult net_result = route_net(net_id, netlist, rr_graph);
 
@@ -171,7 +195,6 @@ RoutingResult SteinerRouter::route(
 
         result.net_results.push_back(net_result);
 
-        // Progress
         if ((result.net_results.size() % 100) == 0) {
             std::cout << "Routed " << result.net_results.size() << "/" << result.total_nets << " nets\n";
         }
@@ -181,4 +204,3 @@ RoutingResult SteinerRouter::route(
 }
 
 } // namespace routing
-

@@ -8,12 +8,12 @@ namespace routing {
 
 float PathFinder::heuristic_cost(RRNodeId current, RRNodeId target) const {
     // Simplificado: retorna 0 (Dijkstra puro)
-    // Poderia usar Manhattan distance se tivéssemos coordenadas
+    // Poderia usar Manhattan distance se usando as coordenadas
     return 0.0f;
 }
 
 float PathFinder::edge_cost(RREdgeId edge_id, float congestion_weight) const {
-    // Base cost é fixo (sem acesso a edge_delay no RRGraph)
+    // Base cost é fixo, podemos buscar o custo real da aresta se necessário
     float base_cost = 1.0f;
     float congestion_cost = congestion_.get_congestion_cost(edge_id);
     return base_cost + congestion_weight * congestion_cost;

@@ -7,6 +7,8 @@
 #include "vpr_context.h"
 #include "netlist_fwd.h"
 #include "rr_graph_obj.h"
+#include <map>
+#include <tuple>
 #include <vector>
 
 namespace routing {
@@ -41,6 +43,20 @@ private:
     float congestion_weight_;
     CongestionMap congestion_map_;
 
+    // Índice espacial: (x, y, ptc, type) -> RRNodeId
+    // Construído uma vez no início do roteamento para evitar busca linear
+    std::map<std::tuple<int, int, int, e_rr_type>, RRNodeId> rr_node_index_;
+
+    // Constrói o índice espacial a partir do RR graph
+    void build_rr_node_index(const RRGraphView& rr_graph);
+
+    // Mapeia um pin físico para seu nó RR correspondente (OPIN para driver, IPIN para sink)
+    RRNodeId find_rr_node_for_pin(
+        ClusterPinId pin_id,
+        const ClusteredNetlist& netlist,
+        const RRGraphView& rr_graph,
+        e_rr_type expected_type) const;
+
     // Obtém localização de um bloco no espaço 2D
     Point get_block_location(ClusterBlockId block_id, const ClusteredNetlist& netlist) const;
 
@@ -50,11 +66,11 @@ private:
         const ClusteredNetlist& netlist,
         const RRGraphView& rr_graph);
 
-    // Encontra nó RRGraph mais próximo de um ponto
+    // Encontra nó RRGraph mais próximo de um ponto (usado para o ponto de Steiner)
     RRNodeId find_nearest_rr_node(
         const Point& location,
         const RRGraphView& rr_graph,
-        t_rr_type preferred_type) const;
+        e_rr_type preferred_type) const;
 };
 
 } // namespace routing
