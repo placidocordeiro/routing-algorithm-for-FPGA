@@ -55,6 +55,7 @@ cmake-build-*/
 # IDE
 .vscode/
 .idea/
+memory/
 *.swp
 *.swo
 *~
