@@ -117,6 +117,10 @@ namespace routing
         // Rotear SOURCE -> cada SINK via PathFinder (Dijkstra com congestionamento)
         PathFinder path_finder(rr_graph, congestion_map_);
 
+        // Nós usados pelos caminhos desta net (podem ser reutilizados entre sinks da mesma net)
+        std::unordered_set<RRNodeId> current_net_nodes;
+        current_net_nodes.insert(source_node); // source sempre pertence à net atual
+
         for (size_t i = 0; i < sink_nodes.size(); ++i)
         {
             int pin_index = static_cast<int>(i) + 1; // 1-indexed, conforme convenção VTR
@@ -125,6 +129,10 @@ namespace routing
             params.source = source_node;
             params.sink = sink_nodes[i];
             params.congestion_weight = congestion_weight_;
+            // Bloquear nós já comprometidos por nets anteriores.
+            // Nós da própria net atual (current_net_nodes) não são bloqueados,
+            // pois compartilhá-los é o que constrói a árvore.
+            params.blocked_nodes = &occupied_nodes_;
 
             PathResult path = path_finder.find_path(params);
 
@@ -145,6 +153,10 @@ namespace routing
 
                 tree.update_from_heap(&heap_node, pin_index, nullptr, /*is_flat=*/false);
 
+                // Acumular nós desta net para bloquear nets futuras
+                for (RRNodeId n : path.nodes)
+                    current_net_nodes.insert(n);
+
                 result.sink_paths.push_back(path);
                 result.sinks_routed++;
 
@@ -152,6 +164,11 @@ namespace routing
                 path_finder.commit_path(path);
             }
         }
+
+        // Comprometer os nós desta net no conjunto global:
+        // nets futuras não poderão usar esses nós como intermediários
+        for (RRNodeId n : current_net_nodes)
+            occupied_nodes_.insert(n);
 
         // Atualizar ocupação global de todos os nós desta net de uma vez
         // (necessário para feasible_routing() e métricas de overuse)
@@ -173,6 +190,10 @@ namespace routing
         result.total_nets = netlist.nets().size();
         result.nets_routed = 0;
         result.congestion_violations = 0;
+
+        // Limpar estado entre chamadas consecutivas (e.g., rodadas W_min vs W_130)
+        occupied_nodes_.clear();
+        congestion_map_.clear();
 
         // Inicializar estruturas de roteamento do VTR antes de rotear
         // alloc_and_load: aloca rr_node_route_inf (ocupação, prev_edge, custos por nó)

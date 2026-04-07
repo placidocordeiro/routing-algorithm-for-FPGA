@@ -80,13 +80,19 @@ namespace routing
             RREdgeId first_edge = rr_graph_.node_first_edge(current.node_id);
             RREdgeId last_edge = rr_graph_.node_last_edge(current.node_id);
 
-            // Iterarcalculando índice baseado em IDs
+            // Iterando calculando índice baseado em IDs
             size_t num_edges = static_cast<size_t>(last_edge) - static_cast<size_t>(first_edge);
             for (size_t edge_idx = 0; edge_idx < num_edges; ++edge_idx)
             {
                 RREdgeId out_edge = RREdgeId(static_cast<size_t>(first_edge) + edge_idx);
                 RRNodeId next_node = rr_graph_.edge_sink_node(current.node_id, edge_idx);
                 if (!next_node.is_valid())
+                    continue;
+
+                // Bloquear nós já ocupados por outras nets, exceto o próprio sink desta busca
+                if (next_node != params.sink &&
+                    params.blocked_nodes &&
+                    params.blocked_nodes->count(next_node) > 0)
                     continue;
 
                 float edge_cost_val = edge_cost(out_edge, params.congestion_weight);

@@ -4,6 +4,7 @@
 #include <vector>
 #include <queue>
 #include <map>
+#include <unordered_set>
 #include <cmath>
 
 namespace routing
@@ -26,6 +27,10 @@ namespace routing
         RRNodeId sink;
         float congestion_weight = 1.0f;
         int max_iterations = 100000; // Limite de explorações para evitar loops infinitos
+
+        // Nós bloqueados por outras nets já roteadas (nunca usar como intermediário).
+        // O sink da busca atual nunca é bloqueado, mesmo que esteja no conjunto.
+        const std::unordered_set<RRNodeId>* blocked_nodes = nullptr;
     };
 
     // Gerenciador de uso de recursos (congestionamento)

@@ -8,6 +8,7 @@
 #include "netlist_fwd.h"
 #include "rr_graph_obj.h"
 #include <vector>
+#include <unordered_set>
 
 namespace routing
 {
@@ -43,6 +44,10 @@ namespace routing
     private:
         float congestion_weight_;
         CongestionMap congestion_map_;
+
+        // Conjunto de nós RR já comprometidos por nets anteriores.
+        // Nenhuma net nova pode passar por esses nós (exclusão de recursos entre nets).
+        std::unordered_set<RRNodeId> occupied_nodes_;
 
         // Encontra nó RRGraph mais próximo de um ponto (usado para o ponto de Steiner)
         RRNodeId find_nearest_rr_node(
