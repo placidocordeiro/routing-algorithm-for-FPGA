@@ -1,0 +1,28 @@
+Netlist_File: /home/placidocordeiro/Documentos/codes/repositorios/routing-algorithm-for-FPGA/benchmarks/tiny/mult_5x5/mult_5x5.net Netlist_ID: SHA256:a0c1b4ba912527d61c642378994e4b342e61c5f4939343c1073c20a81d637af7
+Array size: 5 x 5 logic blocks
+
+#block name	x	y	subblk	layer	block number
+#----------	--	--	------	-----	------------
+p2		1	1	0	0	#0
+n34		3	2	0	0	#1
+n35		3	1	0	0	#2
+out:p0		3	0	3	0	#3
+out:p1		4	1	7	0	#4
+out:p2		1	0	1	0	#5
+out:p3		1	0	5	0	#6
+out:p4		0	1	7	0	#7
+out:p5		1	0	4	0	#8
+out:p6		3	0	7	0	#9
+out:p7		3	0	6	0	#10
+out:p8		4	2	1	0	#11
+out:p9		4	2	3	0	#12
+x0		2	0	6	0	#13
+x1		4	1	2	0	#14
+x2		4	2	5	0	#15
+x3		3	0	1	0	#16
+x4		4	2	2	0	#17
+y0		2	0	4	0	#18
+y1		1	0	7	0	#19
+y2		2	0	2	0	#20
+y3		4	2	0	0	#21
+y4		0	1	6	0	#22

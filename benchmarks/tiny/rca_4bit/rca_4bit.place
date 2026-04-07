@@ -1,0 +1,20 @@
+Netlist_File: /home/placidocordeiro/Documentos/codes/repositorios/routing-algorithm-for-FPGA/benchmarks/tiny/rca_4bit/rca_4bit.net Netlist_ID: SHA256:d7ac73e97561069cad755d5e5b83e454c246fe5b984f5f6f28b2c85a981c0f77
+Array size: 3 x 3 logic blocks
+
+#block name	x	y	subblk	layer	block number
+#----------	--	--	------	-----	------------
+s0		1	1	0	0	#0
+out:s0		2	1	7	0	#1
+out:s1		1	0	0	0	#2
+out:s2		0	1	5	0	#3
+out:s3		0	1	4	0	#4
+out:cout	0	1	1	0	#5
+cin		0	1	0	0	#6
+a0		1	2	6	0	#7
+a1		2	1	5	0	#8
+a2		0	1	7	0	#9
+a3		1	2	0	0	#10
+b0		1	2	7	0	#11
+b1		1	0	1	0	#12
+b2		1	2	3	0	#13
+b3		1	2	4	0	#14

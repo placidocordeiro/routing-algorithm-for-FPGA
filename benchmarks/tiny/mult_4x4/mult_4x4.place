@@ -1,0 +1,23 @@
+Netlist_File: /home/placidocordeiro/Documentos/codes/repositorios/routing-algorithm-for-FPGA/benchmarks/tiny/mult_4x4/mult_4x4.net Netlist_ID: SHA256:08323754bc36f2879ce9b265e8cef05d99ed08a14b4a0a794ad513dcd049f706
+Array size: 4 x 4 logic blocks
+
+#block name	x	y	subblk	layer	block number
+#----------	--	--	------	-----	------------
+n21		1	1	0	0	#0
+n32		1	2	0	0	#1
+out:p0		1	3	4	0	#2
+out:p1		2	3	0	0	#3
+out:p2		1	0	7	0	#4
+out:p3		2	0	6	0	#5
+out:p4		0	1	6	0	#6
+out:p5		0	1	1	0	#7
+out:p6		1	0	4	0	#8
+out:p7		0	1	7	0	#9
+x0		0	2	4	0	#10
+x1		1	3	7	0	#11
+x2		0	1	3	0	#12
+x3		1	0	1	0	#13
+y0		1	0	2	0	#14
+y1		3	2	4	0	#15
+y2		2	0	3	0	#16
+y3		0	1	5	0	#17
