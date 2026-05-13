@@ -55,7 +55,8 @@ cmake-build-*/
 # IDE
 .vscode/
 .idea/
-memory/
+.claude/
+.claudeignore
 *.swp
 *.swo
 *~
@@ -63,3 +64,9 @@ memory/
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated outputs
+*.route
+*.log
+*.rpt
+*.svg

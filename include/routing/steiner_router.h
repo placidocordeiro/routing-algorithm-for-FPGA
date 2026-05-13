@@ -8,57 +8,55 @@
 #include "netlist_fwd.h"
 #include "rr_graph_obj.h"
 #include <vector>
-#include <unordered_set>
 
-namespace routing
-{
-    // Resultado de roteamento para uma net
-    struct NetRoutingResult
-    {
-        bool success;
-        int sinks_routed;
-        int sinks_total;
-        std::vector<PathResult> sink_paths; // Caminho completo (nós + arestas) para cada sink roteado
-    };
+namespace routing {
 
-    // Resultado geral de roteamento
-    struct RoutingResult
-    {
-        int total_nets;
-        int nets_routed;
-        int congestion_violations;
-        std::vector<NetRoutingResult> net_results;
+// Resultado de roteamento para uma net
+struct NetRoutingResult {
+    bool success;
+    int sinks_routed;
+    int sinks_total;
+    std::vector<std::vector<RREdgeId>> sink_paths;  // Caminho para cada sink
+};
 
-        void print_summary() const;
-    };
+// Resultado geral de roteamento
+struct RoutingResult {
+    int total_nets;
+    int nets_routed;
+    int congestion_violations;
+    std::vector<NetRoutingResult> net_results;
 
-    // Router principal usando Steiner Tree
-    class SteinerRouter
-    {
-    public:
-        explicit SteinerRouter(float congestion_weight = 1.0f);
+    void print_summary() const;
+};
 
-        // Roteia toda a netlist e popula g_vpr_ctx.routing() com RouteTrees e ocupação
-        RoutingResult route(const ClusteredNetlist &netlist, const RRGraphView &rr_graph);
+// Router principal usando Steiner Tree
+class SteinerRouter {
+public:
+    explicit SteinerRouter(float congestion_weight = 1.0f);
 
-    private:
-        float congestion_weight_;
-        CongestionMap congestion_map_;
+    // Roteia toda a netlist
+    RoutingResult route(const ClusteredNetlist& netlist, const RRGraphView& rr_graph);
 
-        // Conjunto de nós RR já comprometidos por nets anteriores.
-        // Nenhuma net nova pode passar por esses nós (exclusão de recursos entre nets).
-        std::unordered_set<RRNodeId> occupied_nodes_;
+private:
+    float congestion_weight_;
+    CongestionMap congestion_map_;
 
-        // Encontra nó RRGraph mais próximo de um ponto (usado para o ponto de Steiner)
-        RRNodeId find_nearest_rr_node(
-            const Point &location,
-            const RRGraphView &rr_graph,
-            e_rr_type preferred_type) const;
+    // Obtém localização de um bloco no espaço 2D
+    Point get_block_location(ClusterBlockId block_id, const ClusteredNetlist& netlist) const;
 
-        // Routing de uma rede única — também cria RouteTree no contexto VTR
-        NetRoutingResult route_net(
-            ClusterNetId net_id,
-            const ClusteredNetlist &netlist,
-            const RRGraphView &rr_graph);
-    };
+    // Routing de uma rede única
+    NetRoutingResult route_net(
+        ClusterNetId net_id,
+        const ClusteredNetlist& netlist,
+        const RRGraphView& rr_graph);
+
+    // Espelha o caminho encontrado pelo nosso Dijkstra para as estruturas do VTR:
+    // escreve prev_edge em rr_node_route_inf, chama RouteTree::update_from_heap
+    // e atualiza a ocupância nos nós do novo ramo.
+    void mirror_path_to_vtr(
+        ParentNetId pnet_id,
+        int sink_pin_index,
+        const PathResult& path);
+};
+
 } // namespace routing

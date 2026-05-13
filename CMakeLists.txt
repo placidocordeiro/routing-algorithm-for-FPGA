@@ -93,7 +93,7 @@ foreach(lib ${VTR_ALL_LIBS})
             "Lib não encontrada: ${lib}\n"
             "Compile o VTR primeiro:\n"
             "  cd vtr/build\n"
-            "  make vpr librrgraph libarchfpga libvtrutil libpugiutil liblog -j\$(nproc)"
+            "  make vpr librrgraph libarchfpga libvtrutil libpugiutil liblog -j$(nproc)"
         )
     endif()
 endforeach()
@@ -105,6 +105,21 @@ endforeach()
 find_package(Threads REQUIRED)
 
 # ==============================================================================
+# brkgaAPI — disponível para uso futuro, não utilizado pelo fpga_router
+# ==============================================================================
+
+find_package(OpenMP QUIET)
+if(OpenMP_CXX_FOUND)
+    add_library(brkga STATIC
+        extern/brkgaAPI/brkgaAPI/Population.cpp
+    )
+    target_include_directories(brkga PUBLIC
+        "${CMAKE_SOURCE_DIR}/extern/brkgaAPI/brkgaAPI"
+    )
+    target_link_libraries(brkga PUBLIC OpenMP::OpenMP_CXX)
+endif()
+
+# ==============================================================================
 # Targets
 # ==============================================================================
 
@@ -114,8 +129,8 @@ add_executable(fpga_router
     src/routing/geometry_utils.cpp
     src/routing/path_finder.cpp
     src/routing/steiner_router.cpp
+    src/routing/route_exporter.cpp
 )
-
 
 target_include_directories(fpga_router PRIVATE
     ${VTR_INCLUDE_DIRS}

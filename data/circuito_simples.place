@@ -1,4 +1,4 @@
-Netlist_File: teste/circuito_simples.net Netlist_ID: SHA256:8382bc09529204364a34b16098c00a7337fe285b9af6f63e5c10cf2a736398e6
+Netlist_File: data/circuito_simples.net Netlist_ID: SHA256:8382bc09529204364a34b16098c00a7337fe285b9af6f63e5c10cf2a736398e6
 Array size: 3 x 3 logic blocks
 
 #block name	x	y	subblk	layer	block number

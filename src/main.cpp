@@ -7,6 +7,7 @@
 #include "globals.h"
 #include "vpr_context/loader.h"
 #include "routing/steiner_router.h"
+#include "routing/route_exporter.h"
 #include "route_common.h"
 #include "route_utils.h"
 #include "router_stats.h"
@@ -41,7 +42,6 @@ static void collect_metrics(const ClusteredNetlist& nlist,
     wl_ratio = wl.used_wirelength_ratio();
 }
 
-// Arredonda para o inteiro par mais próximo (acima)
 static int round_up_even(int n) {
     return (n % 2 == 0) ? n : n + 1;
 }
@@ -49,12 +49,22 @@ static int round_up_even(int n) {
 static RoundMetrics run_round(const ClusteredNetlist& nlist,
                               t_vpr_setup& vpr_setup,
                               const t_arch& arch,
-                              int chan_width) {
+                              int chan_width,
+                              const std::string& place_file) {
     RoundMetrics m;
     m.chan_width = chan_width;
 
-    // O RR graph já deve estar em chan_width antes de chamar esta função.
     const auto& rr_graph = g_vpr_ctx.device().rr_graph;
+
+    // ── Inicializar route_ctx para o W atual ──────────────────────────────────
+    // Aloca rr_node_route_inf, zera occupância/prev_edge, redimensiona route_trees
+    // para nlist.nets().size() (todos vtr::nullopt) e popula net_rr_terminals com
+    // SOURCE/SINK reais. Sem isso, escrever em route_ctx pelo Steiner segfaulta.
+    alloc_and_load_rr_node_route_structs();
+    init_route_structs((const Netlist<>&)nlist,
+                       /*bb_factor=*/3,
+                       /*has_choking_point=*/false,
+                       /*is_flat=*/false);
 
     // ── Steiner Router ────────────────────────────────────────────────────────
     std::cout << "\n>>> [W=" << chan_width << "] Executando Steiner Router...\n";
@@ -73,6 +83,15 @@ static RoundMetrics run_round(const ClusteredNetlist& nlist,
                     m.steiner_wl_used,
                     m.wl_avail,
                     m.steiner_wl_ratio);
+    m.steiner_feasible = m.steiner_feasible && (m.nets_routed == m.total_nets);
+
+    // Exporta .route do nosso roteamento (route_trees já populado).
+    {
+        routing::RouteExporter exp;
+        std::string out = "steiner_W" + std::to_string(chan_width) + ".route";
+        exp.export_route(place_file, out, nlist);
+        std::cout << "Steiner route exportado em " << out << "\n";
+    }
 
     // ── VTR Router (W fixo) ───────────────────────────────────────────────────
     std::cout << "\n>>> [W=" << chan_width << "] Executando VTR Router nativo (fixed W)...\n";
@@ -90,6 +109,7 @@ static RoundMetrics run_round(const ClusteredNetlist& nlist,
                     m.vtr_wl_used,
                     m.wl_avail,
                     m.vtr_wl_ratio);
+    m.vtr_feasible = m.vtr_feasible && m.vtr_success;
 
     return m;
 }
@@ -98,13 +118,6 @@ static void print_table(const RoundMetrics& r_min, const RoundMetrics& r_130) {
     const int CW = 22;
     const std::string sep(5 * CW, '=');
     const std::string dash(5 * CW, '-');
-
-    auto col = [&](auto v) -> std::string {
-        if constexpr (std::is_same_v<decltype(v), bool>)
-            return v ? "SIM" : "NAO";
-        else
-            return std::to_string(v);
-    };
 
     std::cout << "\n" << sep << "\n"
               << "  COMPARAÇÃO DE ROTEAMENTO\n"
@@ -205,17 +218,15 @@ int main(int argc, const char* argv[]) {
 
     // =========================================================================
     // RODADA 1 — W = min_W
-    // Após binary search o RR graph já está em min_W; garante com create_rr_graph.
     // =========================================================================
     vpr_create_rr_graph(vpr_setup, arch, min_W, /*is_flat=*/false);
-    RoundMetrics m_min = run_round(nlist, vpr_setup, arch, min_W);
+    RoundMetrics m_min = run_round(nlist, vpr_setup, arch, min_W, argv[4]);
 
     // =========================================================================
     // RODADA 2 — W = 1.3 * min_W
-    // Reconstrói RR graph para o novo W antes de rodar os roteadores.
     // =========================================================================
     vpr_create_rr_graph(vpr_setup, arch, W_130, /*is_flat=*/false);
-    RoundMetrics m_130 = run_round(nlist, vpr_setup, arch, W_130);
+    RoundMetrics m_130 = run_round(nlist, vpr_setup, arch, W_130, argv[4]);
 
     // =========================================================================
     // TABELA COMPARATIVA
