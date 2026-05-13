@@ -11,15 +11,13 @@
 
 namespace routing {
 
-// Resultado de roteamento para uma net
 struct NetRoutingResult {
     bool success;
     int sinks_routed;
     int sinks_total;
-    std::vector<std::vector<RREdgeId>> sink_paths;  // Caminho para cada sink
+    std::vector<std::vector<RREdgeId>> sink_paths;
 };
 
-// Resultado geral de roteamento
 struct RoutingResult {
     int total_nets;
     int nets_routed;
@@ -29,34 +27,21 @@ struct RoutingResult {
     void print_summary() const;
 };
 
-// Router principal usando Steiner Tree
 class SteinerRouter {
 public:
-    explicit SteinerRouter(float congestion_weight = 1.0f);
+    SteinerRouter() = default;
 
-    // Roteia toda a netlist
     RoutingResult route(const ClusteredNetlist& netlist, const RRGraphView& rr_graph);
 
 private:
-    float congestion_weight_;
-    CongestionMap congestion_map_;
+    // Espelha o caminho para route_ctx do VTR: escreve prev_edge, constrói
+    // RouteTree e incrementa occ nos nós do novo ramo.
+    void mirror_path_to_vtr(ParentNetId pnet_id, int sink_pin_index, const PathResult& path);
 
-    // Obtém localização de um bloco no espaço 2D
-    Point get_block_location(ClusterBlockId block_id, const ClusteredNetlist& netlist) const;
-
-    // Routing de uma rede única
     NetRoutingResult route_net(
         ClusterNetId net_id,
         const ClusteredNetlist& netlist,
         const RRGraphView& rr_graph);
-
-    // Espelha o caminho encontrado pelo nosso Dijkstra para as estruturas do VTR:
-    // escreve prev_edge em rr_node_route_inf, chama RouteTree::update_from_heap
-    // e atualiza a ocupância nos nós do novo ramo.
-    void mirror_path_to_vtr(
-        ParentNetId pnet_id,
-        int sink_pin_index,
-        const PathResult& path);
 };
 
 } // namespace routing

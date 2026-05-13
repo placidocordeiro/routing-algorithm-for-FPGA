@@ -68,7 +68,7 @@ static RoundMetrics run_round(const ClusteredNetlist& nlist,
 
     // ── Steiner Router ────────────────────────────────────────────────────────
     std::cout << "\n>>> [W=" << chan_width << "] Executando Steiner Router...\n";
-    routing::SteinerRouter router(1.0f);
+    routing::SteinerRouter router;
 
     auto t0 = std::chrono::steady_clock::now();
     auto result = router.route(nlist, rr_graph);
