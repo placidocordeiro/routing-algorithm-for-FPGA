@@ -159,6 +159,9 @@ if(EXISTS "${CPLEX_ROOT}")
         src/ilp_main.cpp
         src/vpr_context/loader.cpp
         src/ilp/ilp_router.cpp
+        src/routing/geometry_utils.cpp
+        src/routing/path_finder.cpp
+        src/routing/steiner_router.cpp
     )
 
     target_include_directories(ilp_router PRIVATE
