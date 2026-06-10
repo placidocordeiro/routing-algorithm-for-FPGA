@@ -144,3 +144,43 @@ target_link_libraries(fpga_router PRIVATE
     dl
     z
 )
+
+# ==============================================================================
+# ilp_router — modelo ILP de roteamento (CPLEX)
+# ==============================================================================
+
+set(CPLEX_ROOT "/opt/ibm/ILOG/CPLEX_Studio2211" CACHE PATH "Raiz da instalação do CPLEX Studio")
+
+if(EXISTS "${CPLEX_ROOT}")
+    set(CPLEX_LIB_DIR   "${CPLEX_ROOT}/cplex/lib/x86-64_linux/static_pic")
+    set(CONCERT_LIB_DIR "${CPLEX_ROOT}/concert/lib/x86-64_linux/static_pic")
+
+    add_executable(ilp_router
+        src/ilp_main.cpp
+        src/vpr_context/loader.cpp
+        src/ilp/ilp_router.cpp
+    )
+
+    target_include_directories(ilp_router PRIVATE
+        ${VTR_INCLUDE_DIRS}
+        "${CMAKE_SOURCE_DIR}/include"
+        "${CMAKE_SOURCE_DIR}/src"
+        "${CPLEX_ROOT}/cplex/include"
+        "${CPLEX_ROOT}/concert/include"
+    )
+
+    target_compile_definitions(ilp_router PRIVATE IL_STD)
+
+    target_link_libraries(ilp_router PRIVATE
+        ${VTR_ALL_LIBS}
+        "${CPLEX_LIB_DIR}/libilocplex.a"
+        "${CONCERT_LIB_DIR}/libconcert.a"
+        "${CPLEX_LIB_DIR}/libcplex.a"
+        Threads::Threads
+        dl
+        z
+        m
+    )
+else()
+    message(STATUS "CPLEX não encontrado em ${CPLEX_ROOT} — target ilp_router desabilitado")
+endif()
