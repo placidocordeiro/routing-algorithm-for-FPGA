@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <queue>
@@ -158,6 +159,139 @@ void print_delay_comparison(const std::vector<NetData>& nets,
     std::cout << "=====================================\n";
 }
 
+// Procura um ciclo no subgrafo induzido por `used` (arestas com origem e destino
+// ambos em `used`), iniciando a busca a partir de `start`. DFS com cores
+// branco(0)/cinza(1)/preto(2): uma aresta para um nó cinza fecha um ciclo.
+// Retorna a sequência de nós do ciclo (vazio se não houver).
+std::vector<size_t> find_cycle_in_used(size_t start,
+                                       const std::unordered_set<size_t>& used) {
+    const auto& rr_graph = g_vpr_ctx.device().rr_graph;
+
+    std::unordered_map<size_t, int>    color;   // 0=branco, 1=cinza, 2=preto
+    std::unordered_map<size_t, size_t> parent;
+    std::vector<size_t>                stack;    // pilha explícita (nó, prox. aresta)
+    std::vector<t_edge_size>           edge_idx;
+
+    stack.push_back(start);
+    edge_idx.push_back(0);
+    color[start] = 1;
+
+    while (!stack.empty()) {
+        size_t      node = stack.back();
+        RRNodeId    n(node);
+        t_edge_size ne = rr_graph.num_edges(n);
+        bool        descended = false;
+
+        for (t_edge_size& i = edge_idx.back(); i < ne; ) {
+            size_t sink = size_t(rr_graph.edge_sink_node(n, i));
+            i++;
+            if (!used.count(sink)) continue;
+            int c = color.count(sink) ? color[sink] : 0;
+            if (c == 1) {
+                // Aresta de retorno: reconstrói o ciclo node -> ... -> sink.
+                std::vector<size_t> cycle;
+                cycle.push_back(sink);
+                for (size_t w = node; w != sink; w = parent[w]) cycle.push_back(w);
+                cycle.push_back(sink);
+                std::reverse(cycle.begin(), cycle.end());
+                return cycle;
+            }
+            if (c == 0) {
+                color[sink]  = 1;
+                parent[sink] = node;
+                stack.push_back(sink);
+                edge_idx.push_back(0);
+                descended = true;
+                break;
+            }
+        }
+        if (!descended) {
+            color[node] = 2;
+            stack.pop_back();
+            edge_idx.pop_back();
+        }
+    }
+    return {};
+}
+
+// Diagnóstico opt-in (ILP_DIAG): comprova que nets desconectadas se sustentam por
+// ciclos de custo (base_cost) ~zero desconectados do source. Não altera o modelo.
+void diagnose_disconnected(const std::vector<NetData>&  nets,
+                           IloCplex&                    cplex,
+                           const std::vector<IloBoolVarArray>& x,
+                           const std::vector<NetBfs>&   net_bfs,
+                           const std::vector<std::vector<size_t>>& preds,
+                           size_t                       num_nodes) {
+    const auto& rr_graph = g_vpr_ctx.device().rr_graph;
+    const size_t k = nets.size();
+
+    std::cout << "\n========== DIAGNÓSTICO ILP_DIAG ==========\n";
+
+    size_t total_disc = 0, total_orphans = 0, orphans_zero_cost = 0;
+
+    for (size_t i = 0; i < k; i++) {
+        size_t reached = count_reachable_sinks(nets[i], net_bfs[i]);
+        if (reached == nets[i].sinks.size()) continue;
+        total_disc++;
+
+        std::unordered_set<size_t> used;
+        for (size_t v = 0; v < num_nodes; v++) {
+            if (cplex.getValue(x[i][v]) > 0.5) used.insert(v);
+        }
+        const auto& visited = net_bfs[i].visited;
+
+        std::cout << "\nNet " << nets[i].name << " (source " << nets[i].source
+                  << "): " << used.size() << " nós usados, "
+                  << visited.size() << " alcançáveis do source\n";
+
+        // (1) Nós órfãos: usados mas não alcançáveis do source.
+        std::cout << "  Órfãos (used \\ visited):\n";
+        for (size_t v : used) {
+            if (visited.count(v)) continue;
+            total_orphans++;
+            float bc = get_single_rr_cong_base_cost(RRNodeId(v));
+            if (bc == 0.0f) orphans_zero_cost++;
+            std::cout << "    node " << v
+                      << "  tipo " << rr_graph.node_type_string(RRNodeId(v))
+                      << "  base_cost " << bc
+                      << "  cap " << rr_graph.node_capacity(RRNodeId(v))
+                      << "  preds-em-used {";
+            bool first = true;
+            for (size_t u : preds[v]) {
+                if (used.count(u)) {
+                    std::cout << (first ? "" : ",") << u;
+                    first = false;
+                }
+            }
+            std::cout << "}\n";
+        }
+
+        // (2) Ciclo no subgrafo órfão. Procura a partir de cada sink não alcançado.
+        for (size_t t : nets[i].sinks) {
+            if (visited.count(t)) continue;
+            std::vector<size_t> cycle = find_cycle_in_used(t, used);
+            if (cycle.empty()) {
+                std::cout << "  Sink " << t
+                          << ": nenhum ciclo encontrado a partir dele.\n";
+                continue;
+            }
+            float cycle_cost = 0.0f;
+            std::cout << "  Ciclo sustentando sink " << t << ": ";
+            for (size_t j = 0; j < cycle.size(); j++) {
+                std::cout << cycle[j] << (j + 1 < cycle.size() ? " -> " : "");
+                if (j + 1 < cycle.size())
+                    cycle_cost += get_single_rr_cong_base_cost(RRNodeId(cycle[j]));
+            }
+            std::cout << "  | Σ base_cost = " << cycle_cost << "\n";
+        }
+    }
+
+    std::cout << "\n  Resumo: " << total_disc << " nets desconectadas, "
+              << total_orphans << " nós órfãos ("
+              << orphans_zero_cost << " com base_cost = 0)\n";
+    std::cout << "==========================================\n";
+}
+
 } // namespace
 
 void run_ilp_routing() {
@@ -183,6 +317,25 @@ void run_ilp_routing() {
         }
     }
 
+    // Índice global de arestas dirigidas, para as variáveis de fluxo.
+    // edges[e] = {tail, head}; out_edges[v]/in_edges[v] = índices em `edges`.
+    struct Edge { size_t tail, head; };
+    std::vector<Edge>                edges;
+    std::vector<std::vector<size_t>> out_edges(num_nodes), in_edges(num_nodes);
+    for (RRNodeId node : rr_graph.nodes()) {
+        size_t u = size_t(node);
+        for (t_edge_size i = 0; i < rr_graph.num_edges(node); i++) {
+            size_t w = size_t(rr_graph.edge_sink_node(node, i));
+            size_t e = edges.size();
+            edges.push_back({u, w});
+            out_edges[u].push_back(e);
+            in_edges[w].push_back(e);
+        }
+    }
+    const size_t num_edges = edges.size();
+    std::cout << ">>> ILP: " << num_edges << " arestas RR ("
+              << k * num_edges << " variáveis de fluxo)\n";
+
     IloEnv env;
     try {
         IloModel model(env);
@@ -192,6 +345,15 @@ void run_ilp_routing() {
         x.reserve(k);
         for (size_t i = 0; i < k; i++) {
             x.emplace_back(env, (IloInt)num_nodes);
+        }
+
+        // f[i][e] ∈ [0, D_i] — fluxo single-commodity na aresta e para a net i.
+        // D_i = nº de sinks: source emite D_i unidades, cada sink consome 1.
+        std::vector<IloNumVarArray> f;
+        f.reserve(k);
+        for (size_t i = 0; i < k; i++) {
+            IloNum cap_flow = (IloNum)nets[i].sinks.size();
+            f.emplace_back(env, (IloInt)num_edges, 0.0, cap_flow);
         }
 
         // Objetivo: min Σ_i Σ_v c_v · x[i][v], com c_v = base_cost(v) —
@@ -217,17 +379,34 @@ void run_ilp_routing() {
             sum.end();
         }
 
-        // 2. Conectividade: x[i][v] ≤ Σ_{u ∈ preds(v)} x[i][u], ∀ v ≠ source(i)
-        //    (soma vazia força x[i][v] = 0 em nós sem predecessores)
+        // 2. Conectividade via fluxo single-commodity. A restrição de predecessor
+        //    anterior (x[i][v] ≤ Σ preds) era necessária mas não suficiente: admitia
+        //    ciclos desconectados do source sustentando sinks. O fluxo proíbe isso —
+        //    um ciclo isolado não recebe fluxo, logo não entrega a unidade do sink.
         for (size_t i = 0; i < k; i++) {
+            const IloNum D = (IloNum)nets[i].sinks.size();
+
+            std::unordered_set<size_t> sink_set(nets[i].sinks.begin(),
+                                                nets[i].sinks.end());
+
+            // 2a. Conservação: (saída) − (entrada) = oferta − demanda em cada nó.
             for (size_t v = 0; v < num_nodes; v++) {
-                if (v == nets[i].source) continue;
-                IloExpr sum(env);
-                for (size_t u : preds[v]) {
-                    sum += x[i][u];
-                }
-                model.add(x[i][v] <= sum);
-                sum.end();
+                IloExpr balance(env);
+                for (size_t e : out_edges[v]) balance += f[i][e];
+                for (size_t e : in_edges[v])  balance -= f[i][e];
+
+                IloNum rhs = 0.0;
+                if (v == nets[i].source)   rhs = D;       // source emite D_i
+                else if (sink_set.count(v)) rhs = -1.0;    // cada sink consome 1
+                model.add(balance == rhs);
+                balance.end();
+            }
+
+            // 2b. Acoplamento fluxo↔nó: aresta só conduz fluxo se ambos os
+            //     extremos estão usados (x = 1).
+            for (size_t e = 0; e < num_edges; e++) {
+                model.add(f[i][e] <= D * x[i][edges[e].tail]);
+                model.add(f[i][e] <= D * x[i][edges[e].head]);
             }
         }
 
@@ -243,11 +422,22 @@ void run_ilp_routing() {
         cplex.setParam(IloCplex::Param::TimeLimit, 300);
 
         // Warm start: a solução do VTR (route_trees) como MIPStart completo.
+        // Setamos tanto x quanto f — com fluxo, um MIPStart só com x seria
+        // incompleto e o CPLEX poderia descartá-lo. O fluxo da árvore VTR é
+        // reconstruído contando, por aresta, quantos sinks há na subárvore abaixo
+        // dela (= soma das demandas que passam pela aresta no sentido source→sink).
         {
             const auto& route_ctx = g_vpr_ctx.routing();
             IloNumVarArray start_vars(env);
             IloNumArray    start_vals(env);
             size_t nets_with_start = 0;
+
+            // Mapa (tail,head) -> índice de aresta, para casar arestas da route_tree.
+            auto find_edge = [&](size_t tail, size_t head) -> long long {
+                for (size_t e : out_edges[tail])
+                    if (edges[e].head == head) return (long long)e;
+                return -1;
+            };
 
             for (size_t i = 0; i < k; i++) {
                 ParentNetId pid{size_t(nets[i].id)};
@@ -255,12 +445,33 @@ void run_ilp_routing() {
                 nets_with_start++;
 
                 std::unordered_set<size_t> used_vtr;
+                // Parent de cada nó na árvore VTR (para walkback de cada sink).
+                std::unordered_map<size_t, size_t> tree_parent;
                 for (const RouteTreeNode& node : route_ctx.route_trees[pid]->all_nodes()) {
                     used_vtr.insert(size_t(node.inode));
+                    if (node.parent())
+                        tree_parent[size_t(node.inode)] = size_t(node.parent()->inode);
                 }
+
+                // Fluxo por aresta: +1 em cada aresta do caminho source→sink, por sink.
+                std::vector<double> flow(num_edges, 0.0);
+                for (size_t t : nets[i].sinks) {
+                    size_t node = t;
+                    while (node != nets[i].source && tree_parent.count(node)) {
+                        size_t par = tree_parent[node];
+                        long long e = find_edge(par, node);
+                        if (e >= 0) flow[(size_t)e] += 1.0;
+                        node = par;
+                    }
+                }
+
                 for (size_t v = 0; v < num_nodes; v++) {
                     start_vars.add(x[i][v]);
                     start_vals.add(used_vtr.count(v) ? 1.0 : 0.0);
+                }
+                for (size_t e = 0; e < num_edges; e++) {
+                    start_vars.add(f[i][e]);
+                    start_vals.add(flow[e]);
                 }
             }
 
@@ -313,6 +524,10 @@ void run_ilp_routing() {
         }
         std::cout << "\nNets conectadas (BFS): " << nets_ok << "/" << k << "\n";
         std::cout << "===================================\n";
+
+        if (std::getenv("ILP_DIAG") && nets_ok != k) {
+            diagnose_disconnected(nets, cplex, x, net_bfs, preds, num_nodes);
+        }
 
         if (nets_ok != k) {
             std::cout << "Nets desconectadas — comparação de delay abortada.\n";
