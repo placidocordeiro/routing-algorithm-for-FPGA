@@ -5,9 +5,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <queue>
+#include <streambuf>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -20,6 +23,30 @@
 #include "vpr_net_pins_matrix.h"
 
 namespace {
+
+// streambuf que encaminha cada escrita para dois destinos (ex.: cout + arquivo).
+// Permite que o relatório do ILP apareça no console e seja persistido ao mesmo tempo.
+class TeeBuf : public std::streambuf {
+public:
+    TeeBuf(std::streambuf* a, std::streambuf* b) : a_(a), b_(b) {}
+
+protected:
+    int overflow(int c) override {
+        if (c == EOF) return !EOF;
+        int r1 = a_ ? a_->sputc((char)c) : c;
+        int r2 = b_ ? b_->sputc((char)c) : c;
+        return (r1 == EOF || r2 == EOF) ? EOF : c;
+    }
+    int sync() override {
+        int r1 = a_ ? a_->pubsync() : 0;
+        int r2 = b_ ? b_->pubsync() : 0;
+        return (r1 == 0 && r2 == 0) ? 0 : -1;
+    }
+
+private:
+    std::streambuf* a_;
+    std::streambuf* b_;
+};
 
 struct NetData {
     ClusterNetId         id;
@@ -113,14 +140,15 @@ routing::PathResult walkback_path(const NetBfs& bfs, size_t source, size_t sink)
 }
 
 // Compara os delays Elmore (source→sink) dos dois roteamentos.
-void print_delay_comparison(const std::vector<NetData>& nets,
+void print_delay_comparison(std::ostream& out,
+                            const std::vector<NetData>& nets,
                             const NetPinsMatrix<float>& vtr_delay,
                             const NetPinsMatrix<float>& ilp_delay) {
-    std::cout << "\n========== DELAY VTR x ILP ==========\n";
-    std::cout << std::left << std::setw(24) << "Net"
-              << std::setw(16) << "VTR max (ns)"
-              << std::setw(16) << "ILP max (ns)"
-              << "ILP/VTR\n";
+    out << "\n========== DELAY VTR x ILP ==========\n";
+    out << std::left << std::setw(24) << "Net"
+        << std::setw(16) << "VTR max (ns)"
+        << std::setw(16) << "ILP max (ns)"
+        << "ILP/VTR\n";
 
     float vtr_max = 0, ilp_max = 0;
     double vtr_sum = 0, ilp_sum = 0;
@@ -139,24 +167,24 @@ void print_delay_comparison(const std::vector<NetData>& nets,
         vtr_max = std::max(vtr_max, net_vtr_max);
         ilp_max = std::max(ilp_max, net_ilp_max);
 
-        std::cout << std::left << std::setw(24) << net.name
-                  << std::setw(16) << net_vtr_max * 1e9f
-                  << std::setw(16) << net_ilp_max * 1e9f
-                  << (net_vtr_max > 0 ? net_ilp_max / net_vtr_max : 0.0f) << "\n";
+        out << std::left << std::setw(24) << net.name
+            << std::setw(16) << net_vtr_max * 1e9f
+            << std::setw(16) << net_ilp_max * 1e9f
+            << (net_vtr_max > 0 ? net_ilp_max / net_vtr_max : 0.0f) << "\n";
     }
 
-    std::cout << "-------------------------------------\n";
-    std::cout << "Max delay (ns)  : VTR " << vtr_max * 1e9f
-              << " | ILP " << ilp_max * 1e9f
-              << " | razao " << (vtr_max > 0 ? ilp_max / vtr_max : 0.0f) << "\n";
-    std::cout << "Soma sinks (ns) : VTR " << vtr_sum * 1e9
-              << " | ILP " << ilp_sum * 1e9
-              << " | razao " << (vtr_sum > 0 ? ilp_sum / vtr_sum : 0.0) << "\n";
+    out << "-------------------------------------\n";
+    out << "Max delay (ns)  : VTR " << vtr_max * 1e9f
+        << " | ILP " << ilp_max * 1e9f
+        << " | razao " << (vtr_max > 0 ? ilp_max / vtr_max : 0.0f) << "\n";
+    out << "Soma sinks (ns) : VTR " << vtr_sum * 1e9
+        << " | ILP " << ilp_sum * 1e9
+        << " | razao " << (vtr_sum > 0 ? ilp_sum / vtr_sum : 0.0) << "\n";
     if (n_sinks > 0) {
-        std::cout << "Media sink (ns) : VTR " << (vtr_sum / n_sinks) * 1e9
-                  << " | ILP " << (ilp_sum / n_sinks) * 1e9 << "\n";
+        out << "Media sink (ns) : VTR " << (vtr_sum / n_sinks) * 1e9
+            << " | ILP " << (ilp_sum / n_sinks) * 1e9 << "\n";
     }
-    std::cout << "=====================================\n";
+    out << "=====================================\n";
 }
 
 // Procura um ciclo no subgrafo induzido por `used` (arestas com origem e destino
@@ -216,7 +244,8 @@ std::vector<size_t> find_cycle_in_used(size_t start,
 
 // Diagnóstico opt-in (ILP_DIAG): comprova que nets desconectadas se sustentam por
 // ciclos de custo (base_cost) ~zero desconectados do source. Não altera o modelo.
-void diagnose_disconnected(const std::vector<NetData>&  nets,
+void diagnose_disconnected(std::ostream&                out,
+                           const std::vector<NetData>&  nets,
                            IloCplex&                    cplex,
                            const std::vector<IloBoolVarArray>& x,
                            const std::vector<NetBfs>&   net_bfs,
@@ -225,7 +254,7 @@ void diagnose_disconnected(const std::vector<NetData>&  nets,
     const auto& rr_graph = g_vpr_ctx.device().rr_graph;
     const size_t k = nets.size();
 
-    std::cout << "\n========== DIAGNÓSTICO ILP_DIAG ==========\n";
+    out << "\n========== DIAGNÓSTICO ILP_DIAG ==========\n";
 
     size_t total_disc = 0, total_orphans = 0, orphans_zero_cost = 0;
 
@@ -240,30 +269,30 @@ void diagnose_disconnected(const std::vector<NetData>&  nets,
         }
         const auto& visited = net_bfs[i].visited;
 
-        std::cout << "\nNet " << nets[i].name << " (source " << nets[i].source
-                  << "): " << used.size() << " nós usados, "
-                  << visited.size() << " alcançáveis do source\n";
+        out << "\nNet " << nets[i].name << " (source " << nets[i].source
+            << "): " << used.size() << " nós usados, "
+            << visited.size() << " alcançáveis do source\n";
 
         // (1) Nós órfãos: usados mas não alcançáveis do source.
-        std::cout << "  Órfãos (used \\ visited):\n";
+        out << "  Órfãos (used \\ visited):\n";
         for (size_t v : used) {
             if (visited.count(v)) continue;
             total_orphans++;
             float bc = get_single_rr_cong_base_cost(RRNodeId(v));
             if (bc == 0.0f) orphans_zero_cost++;
-            std::cout << "    node " << v
-                      << "  tipo " << rr_graph.node_type_string(RRNodeId(v))
-                      << "  base_cost " << bc
-                      << "  cap " << rr_graph.node_capacity(RRNodeId(v))
-                      << "  preds-em-used {";
+            out << "    node " << v
+                << "  tipo " << rr_graph.node_type_string(RRNodeId(v))
+                << "  base_cost " << bc
+                << "  cap " << rr_graph.node_capacity(RRNodeId(v))
+                << "  preds-em-used {";
             bool first = true;
             for (size_t u : preds[v]) {
                 if (used.count(u)) {
-                    std::cout << (first ? "" : ",") << u;
+                    out << (first ? "" : ",") << u;
                     first = false;
                 }
             }
-            std::cout << "}\n";
+            out << "}\n";
         }
 
         // (2) Ciclo no subgrafo órfão. Procura a partir de cada sink não alcançado.
@@ -271,33 +300,55 @@ void diagnose_disconnected(const std::vector<NetData>&  nets,
             if (visited.count(t)) continue;
             std::vector<size_t> cycle = find_cycle_in_used(t, used);
             if (cycle.empty()) {
-                std::cout << "  Sink " << t
-                          << ": nenhum ciclo encontrado a partir dele.\n";
+                out << "  Sink " << t
+                    << ": nenhum ciclo encontrado a partir dele.\n";
                 continue;
             }
             float cycle_cost = 0.0f;
-            std::cout << "  Ciclo sustentando sink " << t << ": ";
+            out << "  Ciclo sustentando sink " << t << ": ";
             for (size_t j = 0; j < cycle.size(); j++) {
-                std::cout << cycle[j] << (j + 1 < cycle.size() ? " -> " : "");
+                out << cycle[j] << (j + 1 < cycle.size() ? " -> " : "");
                 if (j + 1 < cycle.size())
                     cycle_cost += get_single_rr_cong_base_cost(RRNodeId(cycle[j]));
             }
-            std::cout << "  | Σ base_cost = " << cycle_cost << "\n";
+            out << "  | Σ base_cost = " << cycle_cost << "\n";
         }
     }
 
-    std::cout << "\n  Resumo: " << total_disc << " nets desconectadas, "
-              << total_orphans << " nós órfãos ("
-              << orphans_zero_cost << " com base_cost = 0)\n";
-    std::cout << "==========================================\n";
+    out << "\n  Resumo: " << total_disc << " nets desconectadas, "
+        << total_orphans << " nós órfãos ("
+        << orphans_zero_cost << " com base_cost = 0)\n";
+    out << "==========================================\n";
 }
 
 } // namespace
 
-void run_ilp_routing() {
+void run_ilp_routing(const IlpRunConfig& cfg) {
     const auto& rr_graph = g_vpr_ctx.device().rr_graph;
     const auto& nlist    = g_vpr_ctx.clustering().clb_nlist;
     const size_t num_nodes = rr_graph.num_nodes();
+
+    // Saída persistente: output/<circuito>/<time_limit>/<w_label>/resultado.txt.
+    // O relatório é "tee-ado" para o console e para este arquivo simultaneamente.
+    std::filesystem::path out_dir = std::filesystem::path(cfg.output_base) /
+                                    cfg.circuit_name /
+                                    std::to_string(cfg.time_limit) /
+                                    cfg.w_label;
+    std::error_code ec;
+    std::filesystem::create_directories(out_dir, ec);
+    if (ec) {
+        std::cerr << "Aviso: não foi possível criar " << out_dir
+                  << " (" << ec.message() << "); relatório só no console.\n";
+    }
+    std::ofstream file(out_dir / "resultado.txt", std::ios::trunc);
+    TeeBuf tee(std::cout.rdbuf(), file.is_open() ? file.rdbuf() : nullptr);
+    std::ostream out(&tee);
+
+    out << "===================================\n";
+    out << "Circuito   : " << cfg.circuit_name << "\n";
+    out << "W (canal)  : " << cfg.W << " (" << cfg.w_label << ")\n";
+    out << "Time limit : " << cfg.time_limit << " s\n";
+    out << "===================================\n";
 
     // Delay do roteamento VTR — route_trees ainda intactas do vpr_route_flow.
     NetPinsMatrix<float> vtr_delay = make_net_pins_matrix<float>((const Netlist<>&)nlist);
@@ -306,8 +357,8 @@ void run_ilp_routing() {
     std::vector<NetData> nets = collect_nets();
     const size_t k = nets.size();
 
-    std::cout << "\n>>> ILP: " << k << " nets, " << num_nodes << " nós RR ("
-              << k * num_nodes << " variáveis binárias)\n";
+    out << "\n>>> ILP: " << k << " nets, " << num_nodes << " nós RR ("
+        << k * num_nodes << " variáveis binárias)\n";
 
     // Lista de predecessores: preds[v] = {u : (u,v) ∈ E}
     std::vector<std::vector<size_t>> preds(num_nodes);
@@ -333,8 +384,8 @@ void run_ilp_routing() {
         }
     }
     const size_t num_edges = edges.size();
-    std::cout << ">>> ILP: " << num_edges << " arestas RR ("
-              << k * num_edges << " variáveis de fluxo)\n";
+    out << ">>> ILP: " << num_edges << " arestas RR ("
+        << k * num_edges << " variáveis de fluxo)\n";
 
     IloEnv env;
     try {
@@ -419,7 +470,7 @@ void run_ilp_routing() {
         }
 
         IloCplex cplex(model);
-        cplex.setParam(IloCplex::Param::TimeLimit, 300);
+        cplex.setParam(IloCplex::Param::TimeLimit, cfg.time_limit);
 
         // Warm start: a solução do VTR (route_trees) como MIPStart completo.
         // Setamos tanto x quanto f — com fluxo, um MIPStart só com x seria
@@ -477,11 +528,11 @@ void run_ilp_routing() {
 
             if (nets_with_start == k) {
                 cplex.addMIPStart(start_vars, start_vals);
-                std::cout << ">>> Warm start: solução VTR fornecida como MIPStart ("
-                          << nets_with_start << "/" << k << " nets)\n";
+                out << ">>> Warm start: solução VTR fornecida como MIPStart ("
+                    << nets_with_start << "/" << k << " nets)\n";
             } else {
-                std::cout << ">>> Warm start ignorado: apenas " << nets_with_start
-                          << "/" << k << " nets têm route_tree do VTR\n";
+                out << ">>> Warm start ignorado: apenas " << nets_with_start
+                    << "/" << k << " nets têm route_tree do VTR\n";
             }
             start_vars.end();
             start_vals.end();
@@ -492,17 +543,20 @@ void run_ilp_routing() {
         auto t1 = std::chrono::steady_clock::now();
         double solve_time = std::chrono::duration<double>(t1 - t0).count();
 
-        std::cout << "\n========== RESULTADO ILP ==========\n";
-        std::cout << "Status CPLEX : " << cplex.getStatus() << "\n";
-        std::cout << "Tempo solve  : " << solve_time << " s\n";
+        out << "\n========== RESULTADO ILP ==========\n";
+        out << "Status CPLEX : " << cplex.getStatus() << "\n";
+        out << "Tempo solve  : " << solve_time << " s\n";
 
         if (!solved) {
-            std::cout << "ILP não encontrou solução.\n";
+            out << "ILP não encontrou solução.\n";
             env.end();
             return;
         }
 
-        std::cout << "Custo total (objetivo, base_cost): " << cplex.getObjValue() << "\n\n";
+        out << "Custo total (objetivo, base_cost): " << cplex.getObjValue() << "\n";
+        out << "Melhor bound (best obj value)    : " << cplex.getBestObjValue() << "\n";
+        out << "Gap relativo (MIP)               : "
+            << cplex.getMIPRelativeGap() * 100.0 << " %\n\n";
 
         // Extrair nós usados e verificar conectividade de cada net via BFS.
         std::vector<NetBfs> net_bfs(k);
@@ -517,20 +571,20 @@ void run_ilp_routing() {
             bool ok = (reached == nets[i].sinks.size());
             if (ok) nets_ok++;
 
-            std::cout << "Net " << nets[i].name
-                      << ": " << used.size() << " nós usados, sinks alcançados "
-                      << reached << "/" << nets[i].sinks.size()
-                      << (ok ? "" : "  [DESCONECTADA]") << "\n";
+            out << "Net " << nets[i].name
+                << ": " << used.size() << " nós usados, sinks alcançados "
+                << reached << "/" << nets[i].sinks.size()
+                << (ok ? "" : "  [DESCONECTADA]") << "\n";
         }
-        std::cout << "\nNets conectadas (BFS): " << nets_ok << "/" << k << "\n";
-        std::cout << "===================================\n";
+        out << "\nNets conectadas (BFS): " << nets_ok << "/" << k << "\n";
+        out << "===================================\n";
 
         if (std::getenv("ILP_DIAG") && nets_ok != k) {
-            diagnose_disconnected(nets, cplex, x, net_bfs, preds, num_nodes);
+            diagnose_disconnected(out, nets, cplex, x, net_bfs, preds, num_nodes);
         }
 
         if (nets_ok != k) {
-            std::cout << "Nets desconectadas — comparação de delay abortada.\n";
+            out << "Nets desconectadas — comparação de delay abortada.\n";
             env.end();
             return;
         }
@@ -556,7 +610,7 @@ void run_ilp_routing() {
         NetPinsMatrix<float> ilp_delay = make_net_pins_matrix<float>((const Netlist<>&)nlist);
         load_net_delay_from_routing((const Netlist<>&)nlist, ilp_delay);
 
-        print_delay_comparison(nets, vtr_delay, ilp_delay);
+        print_delay_comparison(out, nets, vtr_delay, ilp_delay);
     } catch (IloException& e) {
         std::cerr << "Erro CPLEX: " << e.getMessage() << "\n";
     }

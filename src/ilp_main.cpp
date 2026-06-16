@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <string>
 #include <vector>
 
 #include "globals.h"
@@ -13,14 +14,26 @@ static int round_up_even(int n) {
     return (n % 2 == 0) ? n : n + 1;
 }
 
+// Deriva o nome do circuito a partir do caminho do .blif: basename sem diretório
+// e cortado no primeiro '.' (ex.: ".../mult_4x4.pre-vpr.blif" -> "mult_4x4").
+static std::string circuit_name_from_blif(const char* blif_path) {
+    std::string p(blif_path);
+    size_t slash = p.find_last_of("/\\");
+    std::string base = (slash == std::string::npos) ? p : p.substr(slash + 1);
+    size_t dot = base.find('.');
+    return (dot == std::string::npos) ? base : base.substr(0, dot);
+}
+
 // Reconstrói o RR graph em W fixo, roteia com o VTR e executa o ILP.
 // O rebuild+reroute por rodada (mesmo padrão de main.cpp) garante que
 // route_trees e rr_graph em g_vpr_ctx — consumidos por run_ilp_routing —
 // fiquem consistentes com o W desta rodada.
 static bool run_round(t_vpr_setup& vpr_setup, t_arch& arch,
-                      const ClusteredNetlist& nlist, int W) {
+                      const ClusteredNetlist& nlist, int W,
+                      const std::string& circuit_name,
+                      const std::string& w_label, int time_limit) {
     std::cout << "\n##############################################\n";
-    std::cout << ">>> RODADA W=" << W << "\n";
+    std::cout << ">>> RODADA W=" << W << " (" << w_label << ")\n";
     std::cout << "##############################################\n";
 
     vpr_create_rr_graph(vpr_setup, arch, W, /*is_flat=*/false);
@@ -35,7 +48,13 @@ static bool run_round(t_vpr_setup& vpr_setup, t_arch& arch,
     std::cout << "VTR roteou com sucesso (W=" << W << ").\n";
     std::cout << "Nós RR : " << g_vpr_ctx.device().rr_graph.num_nodes() << "\n";
 
-    run_ilp_routing();
+    IlpRunConfig cfg;
+    cfg.circuit_name = circuit_name;
+    cfg.W            = W;
+    cfg.w_label      = w_label;
+    cfg.time_limit   = time_limit;
+    cfg.output_base  = "output";
+    run_ilp_routing(cfg);
     return true;
 }
 
@@ -43,7 +62,7 @@ int main(int argc, const char* argv[]) {
     if (argc < 5) {
         std::cerr << "Uso: " << argv[0]
                   << " <arch.xml> <circuito.blif> <circuito.net> <circuito.place>"
-                  << " [modo: both|min|1.3x]\n";
+                  << " [modo: both|min|1.3x] [tempo_limite_seg]\n";
         return 1;
     }
 
@@ -59,6 +78,19 @@ int main(int argc, const char* argv[]) {
             return 1;
         }
     }
+
+    // Tempo limite do CPLEX (segundos): argv[6] opcional, default 300.
+    int time_limit = 300;
+    if (argc >= 7) {
+        time_limit = std::atoi(argv[6]);
+        if (time_limit <= 0) {
+            std::cerr << "Tempo limite inválido '" << argv[6]
+                      << "'. Use um inteiro positivo de segundos.\n";
+            return 1;
+        }
+    }
+
+    std::string circuit_name = circuit_name_from_blif(argv[2]);
 
     t_options   options;
     t_vpr_setup vpr_setup;
@@ -87,13 +119,15 @@ int main(int argc, const char* argv[]) {
     std::cout << "\n==> W mínimo encontrado : " << min_W << "\n";
     std::cout << "==> W x1.3 (arred. par) : " << W_130 << "\n";
 
-    std::vector<int> rounds;
-    if (mode == Mode::BOTH)      rounds = {min_W, W_130};
-    else if (mode == Mode::MIN)  rounds = {min_W};
-    else                         rounds = {W_130};
+    // Cada rodada carrega seu W e o rótulo correspondente (w_min / w_1.3x),
+    // usado para organizar o diretório de saída.
+    std::vector<std::pair<int, std::string>> rounds;
+    if (mode == Mode::BOTH)      rounds = {{min_W, "w_min"}, {W_130, "w_1.3x"}};
+    else if (mode == Mode::MIN)  rounds = {{min_W, "w_min"}};
+    else                         rounds = {{W_130, "w_1.3x"}};
 
-    for (int W : rounds) {
-        if (!run_round(vpr_setup, arch, nlist, W)) {
+    for (const auto& [W, w_label] : rounds) {
+        if (!run_round(vpr_setup, arch, nlist, W, circuit_name, w_label, time_limit)) {
             vpr_free_all(arch, vpr_setup);
             return 1;
         }
