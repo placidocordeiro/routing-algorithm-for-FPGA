@@ -15,7 +15,7 @@ void RoutingResult::print_summary() const {
     std::cout << "Congestion violations: " << congestion_violations << "\n";
 }
 
-void SteinerRouter::mirror_path_to_vtr(
+void mirror_path_to_vtr(
     ParentNetId pnet_id,
     int sink_pin_index,
     const PathResult& path) {

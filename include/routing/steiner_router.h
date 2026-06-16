@@ -27,6 +27,10 @@ struct RoutingResult {
     void print_summary() const;
 };
 
+// Espelha o caminho para route_ctx do VTR: escreve prev_edge, constrói
+// RouteTree e incrementa occ nos nós do novo ramo.
+void mirror_path_to_vtr(ParentNetId pnet_id, int sink_pin_index, const PathResult& path);
+
 class SteinerRouter {
 public:
     SteinerRouter() = default;
@@ -34,10 +38,6 @@ public:
     RoutingResult route(const ClusteredNetlist& netlist, const RRGraphView& rr_graph);
 
 private:
-    // Espelha o caminho para route_ctx do VTR: escreve prev_edge, constrói
-    // RouteTree e incrementa occ nos nós do novo ramo.
-    void mirror_path_to_vtr(ParentNetId pnet_id, int sink_pin_index, const PathResult& path);
-
     NetRoutingResult route_net(
         ClusterNetId net_id,
         const ClusteredNetlist& netlist,
