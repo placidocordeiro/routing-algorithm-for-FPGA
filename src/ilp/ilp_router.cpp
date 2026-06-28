@@ -19,7 +19,7 @@
 #include "net_delay.h"
 #include "route_common.h"
 #include "route_tree.h"
-#include "routing/steiner_router.h"
+#include "routing/route_bridge.h"
 #include "vpr_net_pins_matrix.h"
 
 namespace {
