@@ -1,187 +1,96 @@
-#include <iostream>
-#include <iomanip>
-#include <sstream>
-#include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
 #include <string>
+#include <vector>
+
 #include "globals.h"
-#include "vpr_context/loader.h"
-#include "routing/steiner_router.h"
-#include "routing/route_exporter.h"
-#include "route_common.h"
-#include "route_utils.h"
-#include "router_stats.h"
-#include "check_route.h"
 #include "vpr_api.h"
-
-struct RoundMetrics {
-    int    chan_width        = 0;
-    double steiner_time     = 0.0;
-    double vtr_time         = 0.0;
-    bool   steiner_feasible = false;
-    bool   vtr_feasible     = false;
-    bool   vtr_success      = false;
-    size_t steiner_wl_used  = 0;
-    size_t vtr_wl_used      = 0;
-    size_t wl_avail         = 0;
-    float  steiner_wl_ratio = 0.0f;
-    float  vtr_wl_ratio     = 0.0f;
-    int    nets_routed      = 0;
-    int    total_nets       = 0;
-};
-
-static void collect_metrics(const ClusteredNetlist& nlist,
-                            bool& feasible,
-                            size_t& wl_used,
-                            size_t& wl_available,
-                            float& wl_ratio) {
-    feasible     = feasible_routing();
-    wl_available = calculate_wirelength_available();
-    WirelengthInfo wl = calculate_wirelength_info((const Netlist<>&)nlist, wl_available);
-    wl_used  = wl.used_wirelength();
-    wl_ratio = wl.used_wirelength_ratio();
-}
+#include "vpr_context/loader.h"
+#include "ilp/ilp_router.h"
 
 static int round_up_even(int n) {
     return (n % 2 == 0) ? n : n + 1;
 }
 
-static RoundMetrics run_round(const ClusteredNetlist& nlist,
-                              t_vpr_setup& vpr_setup,
-                              const t_arch& arch,
-                              int chan_width,
-                              const std::string& place_file) {
-    RoundMetrics m;
-    m.chan_width = chan_width;
-
-    const auto& rr_graph = g_vpr_ctx.device().rr_graph;
-
-    // ── Inicializar route_ctx para o W atual ──────────────────────────────────
-    // Aloca rr_node_route_inf, zera occupância/prev_edge, redimensiona route_trees
-    // para nlist.nets().size() (todos vtr::nullopt) e popula net_rr_terminals com
-    // SOURCE/SINK reais. Sem isso, escrever em route_ctx pelo Steiner segfaulta.
-    alloc_and_load_rr_node_route_structs();
-    init_route_structs((const Netlist<>&)nlist,
-                       /*bb_factor=*/3,
-                       /*has_choking_point=*/false,
-                       /*is_flat=*/false);
-
-    // ── Steiner Router ────────────────────────────────────────────────────────
-    std::cout << "\n>>> [W=" << chan_width << "] Executando Steiner Router...\n";
-    routing::SteinerRouter router;
-
-    auto t0 = std::chrono::steady_clock::now();
-    auto result = router.route(nlist, rr_graph);
-    auto t1 = std::chrono::steady_clock::now();
-    m.steiner_time  = std::chrono::duration<double>(t1 - t0).count();
-    m.nets_routed   = result.nets_routed;
-    m.total_nets    = result.total_nets;
-    result.print_summary();
-
-    collect_metrics(nlist,
-                    m.steiner_feasible,
-                    m.steiner_wl_used,
-                    m.wl_avail,
-                    m.steiner_wl_ratio);
-    m.steiner_feasible = m.steiner_feasible && (m.nets_routed == m.total_nets);
-
-    // Exporta .route do nosso roteamento (route_trees já populado).
-    {
-        routing::RouteExporter exp;
-        std::string out = "steiner_W" + std::to_string(chan_width) + ".route";
-        exp.export_route(place_file, out, nlist);
-        std::cout << "Steiner route exportado em " << out << "\n";
-    }
-
-    // ── VTR Router (W fixo) ───────────────────────────────────────────────────
-    std::cout << "\n>>> [W=" << chan_width << "] Executando VTR Router nativo (fixed W)...\n";
-    vpr_setup.RouterOpts.doRouting          = STAGE_DO;
-    vpr_setup.RouterOpts.fixed_channel_width = chan_width;
-
-    auto t2 = std::chrono::steady_clock::now();
-    RouteStatus vtr_status = vpr_route_flow((const Netlist<>&)nlist, vpr_setup, arch, /*is_flat=*/false);
-    auto t3 = std::chrono::steady_clock::now();
-    m.vtr_time    = std::chrono::duration<double>(t3 - t2).count();
-    m.vtr_success = vtr_status.success();
-
-    collect_metrics(nlist,
-                    m.vtr_feasible,
-                    m.vtr_wl_used,
-                    m.wl_avail,
-                    m.vtr_wl_ratio);
-    m.vtr_feasible = m.vtr_feasible && m.vtr_success;
-
-    return m;
+// Deriva o nome do circuito a partir do caminho do .blif: basename sem diretório
+// e cortado no primeiro '.' (ex.: ".../mult_4x4.pre-vpr.blif" -> "mult_4x4").
+static std::string circuit_name_from_blif(const char* blif_path) {
+    std::string p(blif_path);
+    size_t slash = p.find_last_of("/\\");
+    std::string base = (slash == std::string::npos) ? p : p.substr(slash + 1);
+    size_t dot = base.find('.');
+    return (dot == std::string::npos) ? base : base.substr(0, dot);
 }
 
-static void print_table(const RoundMetrics& r_min, const RoundMetrics& r_130) {
-    const int CW = 22;
-    const std::string sep(5 * CW, '=');
-    const std::string dash(5 * CW, '-');
+// Reconstrói o RR graph em W fixo, roteia com o VTR e executa o ILP.
+// O rebuild+reroute por rodada (mesmo padrão de main.cpp) garante que
+// route_trees e rr_graph em g_vpr_ctx — consumidos por run_ilp_routing —
+// fiquem consistentes com o W desta rodada.
+static bool run_round(t_vpr_setup& vpr_setup, t_arch& arch,
+                      const ClusteredNetlist& nlist, int W,
+                      const std::string& circuit_name,
+                      const std::string& w_label, int time_limit) {
+    std::cout << "\n##############################################\n";
+    std::cout << ">>> RODADA W=" << W << " (" << w_label << ")\n";
+    std::cout << "##############################################\n";
 
-    std::cout << "\n" << sep << "\n"
-              << "  COMPARAÇÃO DE ROTEAMENTO\n"
-              << sep << "\n";
+    vpr_create_rr_graph(vpr_setup, arch, W, /*is_flat=*/false);
+    vpr_setup.RouterOpts.doRouting           = STAGE_DO;
+    vpr_setup.RouterOpts.fixed_channel_width = W;
 
-    std::cout << std::left
-              << std::setw(CW) << ""
-              << std::setw(CW) << ("Steiner W=" + std::to_string(r_min.chan_width))
-              << std::setw(CW) << ("VTR    W=" + std::to_string(r_min.chan_width))
-              << std::setw(CW) << ("Steiner W=" + std::to_string(r_130.chan_width))
-              << std::setw(CW) << ("VTR    W=" + std::to_string(r_130.chan_width))
-              << "\n" << dash << "\n";
+    RouteStatus st = vpr_route_flow((const Netlist<>&)nlist, vpr_setup, arch, /*is_flat=*/false);
+    if (!st.success()) {
+        std::cerr << "Erro: VTR não roteou com W=" << W << " (inesperado, W >= min_W).\n";
+        return false;
+    }
+    std::cout << "VTR roteou com sucesso (W=" << W << ").\n";
+    std::cout << "Nós RR : " << g_vpr_ctx.device().rr_graph.num_nodes() << "\n";
 
-    auto row = [&](const char* label, std::string v1, std::string v2, std::string v3, std::string v4) {
-        std::cout << std::setw(CW) << label
-                  << std::setw(CW) << v1
-                  << std::setw(CW) << v2
-                  << std::setw(CW) << v3
-                  << std::setw(CW) << v4 << "\n";
-    };
-
-    auto fstr = [](double v, int prec = 3) {
-        std::ostringstream ss;
-        ss << std::fixed << std::setprecision(prec) << v;
-        return ss.str();
-    };
-
-    row("Tempo (s)",
-        fstr(r_min.steiner_time), fstr(r_min.vtr_time),
-        fstr(r_130.steiner_time), fstr(r_130.vtr_time));
-
-    row("Nets roteadas",
-        std::to_string(r_min.nets_routed) + "/" + std::to_string(r_min.total_nets), "-",
-        std::to_string(r_130.nets_routed) + "/" + std::to_string(r_130.total_nets), "-");
-
-    row("WL usado",
-        std::to_string(r_min.steiner_wl_used), std::to_string(r_min.vtr_wl_used),
-        std::to_string(r_130.steiner_wl_used), std::to_string(r_130.vtr_wl_used));
-
-    row("WL disponivel",
-        std::to_string(r_min.wl_avail), std::to_string(r_min.wl_avail),
-        std::to_string(r_130.wl_avail), std::to_string(r_130.wl_avail));
-
-    row("Utilizacao (%)",
-        fstr(r_min.steiner_wl_ratio * 100.0f, 1), fstr(r_min.vtr_wl_ratio * 100.0f, 1),
-        fstr(r_130.steiner_wl_ratio * 100.0f, 1), fstr(r_130.vtr_wl_ratio * 100.0f, 1));
-
-    row("Feasible",
-        (r_min.steiner_feasible ? "SIM" : "NAO"), (r_min.vtr_feasible ? "SIM" : "NAO"),
-        (r_130.steiner_feasible ? "SIM" : "NAO"), (r_130.vtr_feasible ? "SIM" : "NAO"));
-
-    row("VTR routed OK",
-        "-", (r_min.vtr_success ? "SIM" : "NAO"),
-        "-", (r_130.vtr_success ? "SIM" : "NAO"));
-
-    std::cout << sep << "\n";
+    IlpRunConfig cfg;
+    cfg.circuit_name = circuit_name;
+    cfg.W            = W;
+    cfg.w_label      = w_label;
+    cfg.time_limit   = time_limit;
+    cfg.output_base  = "output";
+    run_ilp_routing(cfg);
+    return true;
 }
 
 int main(int argc, const char* argv[]) {
     if (argc < 5) {
         std::cerr << "Uso: " << argv[0]
-                  << " <arch.xml> <circuito.blif> <circuito.net> <circuito.place>\n";
+                  << " <arch.xml> <circuito.blif> <circuito.net> <circuito.place>"
+                  << " [modo: both|min|1.3x] [tempo_limite_seg]\n";
         return 1;
     }
+
+    // Modo de rodada: both (default), min (só min_W) ou 1.3x (só 1.3*min_W).
+    enum class Mode { BOTH, MIN, W130 };
+    Mode mode = Mode::BOTH;
+    if (argc >= 6) {
+        if (std::strcmp(argv[5], "min") == 0)        mode = Mode::MIN;
+        else if (std::strcmp(argv[5], "1.3x") == 0)  mode = Mode::W130;
+        else if (std::strcmp(argv[5], "both") == 0)  mode = Mode::BOTH;
+        else {
+            std::cerr << "Modo inválido '" << argv[5] << "'. Use: both|min|1.3x\n";
+            return 1;
+        }
+    }
+
+    // Tempo limite do CPLEX (segundos): argv[6] opcional, default 300.
+    int time_limit = 300;
+    if (argc >= 7) {
+        time_limit = std::atoi(argv[6]);
+        if (time_limit <= 0) {
+            std::cerr << "Tempo limite inválido '" << argv[6]
+                      << "'. Use um inteiro positivo de segundos.\n";
+            return 1;
+        }
+    }
+
+    std::string circuit_name = circuit_name_from_blif(argv[2]);
 
     t_options   options;
     t_vpr_setup vpr_setup;
@@ -191,47 +100,38 @@ int main(int argc, const char* argv[]) {
                      options, vpr_setup, arch);
 
     const auto& nlist = g_vpr_ctx.clustering().clb_nlist;
-
     std::cout << "Blocos : " << nlist.blocks().size() << "\n";
     std::cout << "Nets   : " << nlist.nets().size()   << "\n";
-    std::cout << "Nós RR : " << g_vpr_ctx.device().rr_graph.nodes().size() << "\n\n";
 
-    // =========================================================================
-    // PASSO 0 — Rodar VTR sem W fixo para descobrir min_W (binary search)
-    // =========================================================================
-    std::cout << ">>> Descobrindo W mínimo via VTR (binary search)...\n";
+    // PASSO 0 — descobrir o W mínimo via VTR (binary search), em vez de fixar
+    // um W arbitrário. Assim cada circuito roda no W que o VTR considera viável.
+    std::cout << "\n>>> Descobrindo W mínimo via VTR (binary search)...\n";
     vpr_setup.RouterOpts.doRouting           = STAGE_DO;
     vpr_setup.RouterOpts.fixed_channel_width = NO_FIXED_CHANNEL_WIDTH;
 
-    RouteStatus vpr_discovery = vpr_route_flow((const Netlist<>&)nlist, vpr_setup, arch, /*is_flat=*/false);
-    int min_W = vpr_discovery.chan_width();
-
+    RouteStatus disc = vpr_route_flow((const Netlist<>&)nlist, vpr_setup, arch, /*is_flat=*/false);
+    int min_W = disc.chan_width();
     if (min_W <= 0) {
         std::cerr << "Erro: VTR não encontrou W mínimo válido (result=" << min_W << ").\n";
         return 1;
     }
-
     int W_130 = round_up_even((int)std::ceil(1.3 * min_W));
-
     std::cout << "\n==> W mínimo encontrado : " << min_W << "\n";
-    std::cout << "==> W x1.3 (arred. par) : " << W_130 << "\n\n";
+    std::cout << "==> W x1.3 (arred. par) : " << W_130 << "\n";
 
-    // =========================================================================
-    // RODADA 1 — W = min_W
-    // =========================================================================
-    vpr_create_rr_graph(vpr_setup, arch, min_W, /*is_flat=*/false);
-    RoundMetrics m_min = run_round(nlist, vpr_setup, arch, min_W, argv[4]);
+    // Cada rodada carrega seu W e o rótulo correspondente (w_min / w_1.3x),
+    // usado para organizar o diretório de saída.
+    std::vector<std::pair<int, std::string>> rounds;
+    if (mode == Mode::BOTH)      rounds = {{min_W, "w_min"}, {W_130, "w_1.3x"}};
+    else if (mode == Mode::MIN)  rounds = {{min_W, "w_min"}};
+    else                         rounds = {{W_130, "w_1.3x"}};
 
-    // =========================================================================
-    // RODADA 2 — W = 1.3 * min_W
-    // =========================================================================
-    vpr_create_rr_graph(vpr_setup, arch, W_130, /*is_flat=*/false);
-    RoundMetrics m_130 = run_round(nlist, vpr_setup, arch, W_130, argv[4]);
-
-    // =========================================================================
-    // TABELA COMPARATIVA
-    // =========================================================================
-    print_table(m_min, m_130);
+    for (const auto& [W, w_label] : rounds) {
+        if (!run_round(vpr_setup, arch, nlist, W, circuit_name, w_label, time_limit)) {
+            vpr_free_all(arch, vpr_setup);
+            return 1;
+        }
+    }
 
     vpr_free_all(arch, vpr_setup);
     return 0;

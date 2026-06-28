@@ -1,5 +1,5 @@
 [submodule "vtr"]
-	path = vtr
+	path = extern/vtr
 	url = https://github.com/verilog-to-routing/vtr-verilog-to-routing.git
 [submodule "extern/brkgaAPI"]
 	path = extern/brkgaAPI

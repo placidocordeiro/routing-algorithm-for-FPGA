@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Caminhos base do VTR
 # ==============================================================================
 
-set(VTR_ROOT  "${CMAKE_SOURCE_DIR}/vtr")
+set(VTR_ROOT  "${CMAKE_SOURCE_DIR}/extern/vtr")
 set(VTR_BUILD "${VTR_ROOT}/build")
 set(VTR_LIBS  "${VTR_BUILD}/libs")
 set(VTR_EXT   "${VTR_LIBS}/EXTERNAL")
@@ -108,42 +108,24 @@ find_package(Threads REQUIRED)
 # brkgaAPI — disponível para uso futuro, não utilizado pelo fpga_router
 # ==============================================================================
 
-find_package(OpenMP QUIET)
-if(OpenMP_CXX_FOUND)
-    add_library(brkga STATIC
-        extern/brkgaAPI/brkgaAPI/Population.cpp
-    )
-    target_include_directories(brkga PUBLIC
-        "${CMAKE_SOURCE_DIR}/extern/brkgaAPI/brkgaAPI"
-    )
-    target_link_libraries(brkga PUBLIC OpenMP::OpenMP_CXX)
+option(BUILD_BRKGA "Compilar brkgaAPI (reservado p/ meta-heurística futura)" OFF)
+
+if(BUILD_BRKGA)
+    find_package(OpenMP QUIET)
+    if(OpenMP_CXX_FOUND)
+        add_library(brkga STATIC
+            extern/brkgaAPI/brkgaAPI/Population.cpp
+        )
+        target_include_directories(brkga PUBLIC
+            "${CMAKE_SOURCE_DIR}/extern/brkgaAPI/brkgaAPI"
+        )
+        target_link_libraries(brkga PUBLIC OpenMP::OpenMP_CXX)
+    endif()
 endif()
 
 # ==============================================================================
 # Targets
 # ==============================================================================
-
-add_executable(fpga_router
-    src/main.cpp
-    src/vpr_context/loader.cpp
-    src/routing/geometry_utils.cpp
-    src/routing/path_finder.cpp
-    src/routing/steiner_router.cpp
-    src/routing/route_exporter.cpp
-)
-
-target_include_directories(fpga_router PRIVATE
-    ${VTR_INCLUDE_DIRS}
-    "${CMAKE_SOURCE_DIR}/include"    # permite #include "routing/..." headers
-    "${CMAKE_SOURCE_DIR}/src"        # permite #include "vpr_context/loader.h"
-)
-
-target_link_libraries(fpga_router PRIVATE
-    ${VTR_ALL_LIBS}
-    Threads::Threads
-    dl
-    z
-)
 
 # ==============================================================================
 # ilp_router — modelo ILP de roteamento (CPLEX)
@@ -156,17 +138,14 @@ if(EXISTS "${CPLEX_ROOT}")
     set(CONCERT_LIB_DIR "${CPLEX_ROOT}/concert/lib/x86-64_linux/static_pic")
 
     add_executable(ilp_router
-        src/ilp_main.cpp
+        src/main.cpp
         src/vpr_context/loader.cpp
         src/ilp/ilp_router.cpp
-        src/routing/geometry_utils.cpp
-        src/routing/path_finder.cpp
-        src/routing/steiner_router.cpp
+        src/routing/route_bridge.cpp
     )
 
     target_include_directories(ilp_router PRIVATE
         ${VTR_INCLUDE_DIRS}
-        "${CMAKE_SOURCE_DIR}/include"
         "${CMAKE_SOURCE_DIR}/src"
         "${CPLEX_ROOT}/cplex/include"
         "${CPLEX_ROOT}/concert/include"
