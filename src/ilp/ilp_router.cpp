@@ -321,6 +321,51 @@ void diagnose_disconnected(std::ostream&                out,
     out << "==========================================\n";
 }
 
+// Callback genérico do CPLEX, registrado por cima do modelo (add-on — não altera
+// variáveis, restrições nem objetivo). Monitora o progresso do solve em modo
+// read-only via contexto GLOBAL_PROGRESS (invocado por uma única thread, logo sem
+// necessidade de mutex e sem afetar o resultado). Captura a timeline que o
+// relatório pós-solve não conseguia medir: tempo até o 1º incumbent e número de
+// melhorias de incumbent.
+class IlpProgressCallback : public IloCplex::Callback::Function {
+public:
+    explicit IlpProgressCallback(std::chrono::steady_clock::time_point t0)
+        : t0_(t0) {}
+
+    void invoke(const IloCplex::Callback::Context& context) override {
+        if (!context.inGlobalProgress()) return;
+        ++num_calls_;
+
+        // getIncumbentObjective() retorna IloInfinity (ou lança) enquanto não há
+        // incumbent; tratamos ambos os casos para registrar o 1º de forma robusta.
+        double inc = IloInfinity;
+        try { inc = context.getIncumbentObjective(); } catch (IloException&) {}
+        if (inc >= IloInfinity / 2.0) return;
+
+        double now = std::chrono::duration<double>(
+                         std::chrono::steady_clock::now() - t0_).count();
+        if (t_first_incumbent_ < 0.0) {
+            t_first_incumbent_ = now;
+            best_incumbent_    = inc;
+            ++num_incumbents_;
+        } else if (inc < best_incumbent_ - 1e-9) {
+            best_incumbent_ = inc;
+            ++num_incumbents_;
+        }
+    }
+
+    double t_first_incumbent() const { return t_first_incumbent_; }
+    long   num_incumbents()    const { return num_incumbents_; }
+    long   num_calls()         const { return num_calls_; }
+
+private:
+    std::chrono::steady_clock::time_point t0_;
+    double t_first_incumbent_ = -1.0;
+    double best_incumbent_    = 0.0;
+    long   num_incumbents_    = 0;
+    long   num_calls_         = 0;
+};
+
 } // namespace
 
 void run_ilp_routing(const IlpRunConfig& cfg) {
@@ -386,6 +431,11 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
     const size_t num_edges = edges.size();
     out << ">>> ILP: " << num_edges << " arestas RR ("
         << k * num_edges << " variáveis de fluxo)\n";
+
+    // Tempo de build do modelo (construção + warm start), medido separado do
+    // solve para a tabela de escalabilidade — o comparativo científico usa só o
+    // tempo de solve, mas o tempo de build faz parte da história de escala.
+    auto t_build0 = std::chrono::steady_clock::now();
 
     IloEnv env;
     try {
@@ -539,12 +589,24 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
         }
 
         auto t0 = std::chrono::steady_clock::now();
+        double build_time = std::chrono::duration<double>(t0 - t_build0).count();
+
+        // Callback add-on (liga/desliga por env ILP_CALLBACK=off, default on).
+        // Read-only; usado para A/B (ON vs OFF) sem mexer no modelo.
+        const char* cb_env = std::getenv("ILP_CALLBACK");
+        bool use_callback = !(cb_env && std::string(cb_env) == "off");
+        IlpProgressCallback cb(t0);
+        if (use_callback) {
+            cplex.use(&cb, IloCplex::Callback::Context::Id::GlobalProgress);
+        }
+
         bool solved = cplex.solve();
         auto t1 = std::chrono::steady_clock::now();
         double solve_time = std::chrono::duration<double>(t1 - t0).count();
 
         out << "\n========== RESULTADO ILP ==========\n";
         out << "Status CPLEX : " << cplex.getStatus() << "\n";
+        out << "Tempo build  : " << build_time << " s\n";
         out << "Tempo solve  : " << solve_time << " s\n";
 
         if (!solved) {
@@ -556,7 +618,22 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
         out << "Custo total (objetivo, base_cost): " << cplex.getObjValue() << "\n";
         out << "Melhor bound (best obj value)    : " << cplex.getBestObjValue() << "\n";
         out << "Gap relativo (MIP)               : "
-            << cplex.getMIPRelativeGap() * 100.0 << " %\n\n";
+            << cplex.getMIPRelativeGap() * 100.0 << " %\n";
+        out << "Nós B&B explorados               : " << cplex.getNnodes() << "\n";
+        out << "Variáveis (x / f)                : "
+            << (k * num_nodes) << " / " << (k * num_edges) << "\n";
+        out << "Restrições (CPLEX getNrows)      : " << cplex.getNrows() << "\n";
+        if (use_callback) {
+            out << "Callback         : ON (progress)\n";
+            out << "Tempo 1o incumbent: "
+                << (cb.t_first_incumbent() >= 0.0
+                        ? std::to_string(cb.t_first_incumbent()) + " s"
+                        : "(nenhum)") << "\n";
+            out << "Incumbents (melhorias): " << cb.num_incumbents() << "\n";
+        } else {
+            out << "Callback         : OFF\n";
+        }
+        out << "\n";
 
         // Extrair nós usados e verificar conectividade de cada net via BFS.
         std::vector<NetBfs> net_bfs(k);
