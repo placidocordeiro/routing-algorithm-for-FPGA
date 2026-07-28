@@ -16,5 +16,8 @@ struct IlpRunConfig {
 // Monta e resolve o modelo ILP de roteamento (CPLEX/Concert) usando os dados
 // já carregados em g_vpr_ctx: RRGraph como grafo base e net_rr_terminals como
 // sources/sinks de cada net.
+// Por padrão, cria para cada net um subgrafo delimitado pela rota VTR e por uma
+// margem espacial de 3 tiles. ILP_BBOX=off restaura o domínio denso;
+// ILP_BBOX_MARGIN=N altera a margem; ILP_BBOX_VERBOSE=1 detalha cada net.
 // Requer que vpr_route_flow já tenha sido executado (net_rr_terminals populado).
 void run_ilp_routing(const IlpRunConfig& cfg);

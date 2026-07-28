@@ -9,8 +9,11 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <queue>
+#include <stdexcept>
 #include <streambuf>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -55,6 +58,65 @@ struct NetData {
     std::vector<size_t>  sinks;
 };
 
+struct Edge {
+    size_t tail;
+    size_t head;
+};
+
+// Domínio esparso de uma net. Os índices de x/f são locais, mas nodes/edges
+// guardam o índice correspondente no RRGraph global. A formulação permanece a
+// mesma; variáveis fora deste subgrafo induzido são implicitamente fixadas em 0.
+struct NetDomain {
+    std::vector<size_t> nodes;
+    std::vector<size_t> edges;
+    bool fallback_full_graph = false;
+};
+
+struct VtrRouteData {
+    std::unordered_set<size_t> used_nodes;
+    std::unordered_map<size_t, size_t> parent;
+    bool complete = false;
+};
+
+struct BoundingBox {
+    int xmin = std::numeric_limits<int>::max();
+    int ymin = std::numeric_limits<int>::max();
+    int xmax = std::numeric_limits<int>::min();
+    int ymax = std::numeric_limits<int>::min();
+
+    bool valid() const { return xmin <= xmax && ymin <= ymax; }
+};
+
+size_t local_index(const std::vector<size_t>& sorted_ids, size_t global_id) {
+    auto it = std::lower_bound(sorted_ids.begin(), sorted_ids.end(), global_id);
+    if (it == sorted_ids.end() || *it != global_id)
+        return std::numeric_limits<size_t>::max();
+    return size_t(it - sorted_ids.begin());
+}
+
+bool env_enabled(const char* name, bool default_value) {
+    const char* value = std::getenv(name);
+    if (!value) return default_value;
+    return std::string(value) != "off" && std::string(value) != "0"
+           && std::string(value) != "false";
+}
+
+int bbox_margin_from_env(std::ostream& out) {
+    constexpr int default_margin = 3;
+    const char* value = std::getenv("ILP_BBOX_MARGIN");
+    if (!value) return default_margin;
+
+    char* end = nullptr;
+    long parsed = std::strtol(value, &end, 10);
+    if (end == value || *end != '\0' || parsed < 0
+        || parsed > std::numeric_limits<int>::max()) {
+        out << "Aviso: ILP_BBOX_MARGIN='" << value
+            << "' inválido; usando " << default_margin << ".\n";
+        return default_margin;
+    }
+    return int(parsed);
+}
+
 // Coleta as nets roteáveis com seus terminais SOURCE/SINK no RRGraph.
 std::vector<NetData> collect_nets() {
     const auto& nlist       = g_vpr_ctx.clustering().clb_nlist;
@@ -64,7 +126,7 @@ std::vector<NetData> collect_nets() {
     for (ClusterNetId net_id : nlist.nets()) {
         if (nlist.net_is_ignored(net_id)) continue;  // clocks/globals não são roteadas
 
-        ParentNetId pid{size_t(net_id)};
+        ParentNetId pid{static_cast<int>(size_t(net_id))};
         const auto& terminals = routing_ctx.net_rr_terminals[pid];
         if (terminals.size() < 2) continue;
 
@@ -78,6 +140,117 @@ std::vector<NetData> collect_nets() {
         nets.push_back(std::move(net));
     }
     return nets;
+}
+
+void include_node_in_box(BoundingBox& box, size_t node_id) {
+    const auto& rr_graph = g_vpr_ctx.device().rr_graph;
+    RRNodeId node(node_id);
+    box.xmin = std::min(box.xmin, int(rr_graph.node_xlow(node)));
+    box.ymin = std::min(box.ymin, int(rr_graph.node_ylow(node)));
+    box.xmax = std::max(box.xmax, int(rr_graph.node_xhigh(node)));
+    box.ymax = std::max(box.ymax, int(rr_graph.node_yhigh(node)));
+}
+
+bool node_intersects_box(size_t node_id, const BoundingBox& box, int margin) {
+    const auto& rr_graph = g_vpr_ctx.device().rr_graph;
+    RRNodeId node(node_id);
+    const long long m = margin;
+    return static_cast<long long>(rr_graph.node_xhigh(node))
+               >= static_cast<long long>(box.xmin) - m
+           && static_cast<long long>(rr_graph.node_xlow(node))
+                  <= static_cast<long long>(box.xmax) + m
+           && static_cast<long long>(rr_graph.node_yhigh(node))
+                  >= static_cast<long long>(box.ymin) - m
+           && static_cast<long long>(rr_graph.node_ylow(node))
+                  <= static_cast<long long>(box.ymax) + m;
+}
+
+std::vector<VtrRouteData> collect_vtr_routes(const std::vector<NetData>& nets,
+                                             const std::vector<Edge>& edges,
+                                             const std::vector<std::vector<size_t>>& out_edges) {
+    const auto& route_ctx = g_vpr_ctx.routing();
+    std::vector<VtrRouteData> routes(nets.size());
+
+    auto find_edge = [&](size_t tail, size_t head) -> size_t {
+        for (size_t edge_id : out_edges[tail]) {
+            if (edges[edge_id].head == head) return edge_id;
+        }
+        return std::numeric_limits<size_t>::max();
+    };
+
+    for (size_t i = 0; i < nets.size(); i++) {
+        ParentNetId pid{static_cast<int>(size_t(nets[i].id))};
+        if (!route_ctx.route_trees[pid]) continue;
+
+        VtrRouteData& route = routes[i];
+        for (const RouteTreeNode& node : route_ctx.route_trees[pid]->all_nodes()) {
+            route.used_nodes.insert(size_t(node.inode));
+            if (node.parent())
+                route.parent[size_t(node.inode)] = size_t(node.parent()->inode);
+        }
+
+        route.complete = route.used_nodes.count(nets[i].source) != 0;
+        for (size_t sink : nets[i].sinks) {
+            size_t node = sink;
+            size_t steps = 0;
+            if (!route.used_nodes.count(sink)) route.complete = false;
+            while (route.complete && node != nets[i].source) {
+                auto parent_it = route.parent.find(node);
+                if (parent_it == route.parent.end()
+                    || ++steps > route.used_nodes.size()) {
+                    route.complete = false;
+                    break;
+                }
+                size_t parent = parent_it->second;
+                if (find_edge(parent, node) == std::numeric_limits<size_t>::max()) {
+                    route.complete = false;
+                    break;
+                }
+                node = parent;
+            }
+        }
+    }
+    return routes;
+}
+
+NetDomain make_net_domain(const NetData& net,
+                          const VtrRouteData& route,
+                          const std::vector<Edge>& edges,
+                          size_t num_nodes,
+                          bool bbox_enabled,
+                          int margin) {
+    const bool use_full_graph = !bbox_enabled || !route.complete;
+    std::vector<unsigned char> selected(num_nodes, use_full_graph ? 1 : 0);
+
+    if (!use_full_graph) {
+        BoundingBox box;
+        include_node_in_box(box, net.source);
+        for (size_t sink : net.sinks) include_node_in_box(box, sink);
+        for (size_t node : route.used_nodes) include_node_in_box(box, node);
+
+        for (size_t node = 0; node < num_nodes; node++) {
+            if (node_intersects_box(node, box, margin)) selected[node] = 1;
+        }
+
+        // Inclusão explícita protege a rota VTR até contra particularidades de
+        // coordenadas de SOURCE/SINK e segmentos longos do RRGraph.
+        selected[net.source] = 1;
+        for (size_t sink : net.sinks) selected[sink] = 1;
+        for (size_t node : route.used_nodes) selected[node] = 1;
+    }
+
+    NetDomain domain;
+    domain.fallback_full_graph = bbox_enabled && use_full_graph;
+    for (size_t node = 0; node < num_nodes; node++) {
+        if (selected[node]) domain.nodes.push_back(node);
+    }
+
+    for (size_t edge_id = 0; edge_id < edges.size(); edge_id++) {
+        const Edge& edge = edges[edge_id];
+        if (!selected[edge.tail] || !selected[edge.head]) continue;
+        domain.edges.push_back(edge_id);
+    }
+    return domain;
 }
 
 // BFS no RRGraph restrito aos nós selecionados pela net, a partir do source.
@@ -155,7 +328,7 @@ void print_delay_comparison(std::ostream& out,
     size_t n_sinks = 0;
 
     for (const NetData& net : nets) {
-        ParentNetId pid{size_t(net.id)};
+        ParentNetId pid{static_cast<int>(size_t(net.id))};
         float net_vtr_max = 0, net_ilp_max = 0;
         for (size_t j = 1; j <= net.sinks.size(); j++) {
             net_vtr_max = std::max(net_vtr_max, vtr_delay[pid][j]);
@@ -248,9 +421,9 @@ void diagnose_disconnected(std::ostream&                out,
                            const std::vector<NetData>&  nets,
                            IloCplex&                    cplex,
                            const std::vector<IloBoolVarArray>& x,
+                           const std::vector<NetDomain>& domains,
                            const std::vector<NetBfs>&   net_bfs,
-                           const std::vector<std::vector<size_t>>& preds,
-                           size_t                       num_nodes) {
+                           const std::vector<std::vector<size_t>>& preds) {
     const auto& rr_graph = g_vpr_ctx.device().rr_graph;
     const size_t k = nets.size();
 
@@ -264,8 +437,9 @@ void diagnose_disconnected(std::ostream&                out,
         total_disc++;
 
         std::unordered_set<size_t> used;
-        for (size_t v = 0; v < num_nodes; v++) {
-            if (cplex.getValue(x[i][v]) > 0.5) used.insert(v);
+        for (size_t local = 0; local < domains[i].nodes.size(); local++) {
+            if (cplex.getValue(x[i][local]) > 0.5)
+                used.insert(domains[i].nodes[local]);
         }
         const auto& visited = net_bfs[i].visited;
 
@@ -402,9 +576,6 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
     std::vector<NetData> nets = collect_nets();
     const size_t k = nets.size();
 
-    out << "\n>>> ILP: " << k << " nets, " << num_nodes << " nós RR ("
-        << k * num_nodes << " variáveis binárias)\n";
-
     // Lista de predecessores: preds[v] = {u : (u,v) ∈ E}
     std::vector<std::vector<size_t>> preds(num_nodes);
     for (RRNodeId node : rr_graph.nodes()) {
@@ -414,10 +585,9 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
     }
 
     // Índice global de arestas dirigidas, para as variáveis de fluxo.
-    // edges[e] = {tail, head}; out_edges[v]/in_edges[v] = índices em `edges`.
-    struct Edge { size_t tail, head; };
+    // edges[e] = {tail, head}; out_edges[v] = índices globais em `edges`.
     std::vector<Edge>                edges;
-    std::vector<std::vector<size_t>> out_edges(num_nodes), in_edges(num_nodes);
+    std::vector<std::vector<size_t>> out_edges(num_nodes);
     for (RRNodeId node : rr_graph.nodes()) {
         size_t u = size_t(node);
         for (t_edge_size i = 0; i < rr_graph.num_edges(node); i++) {
@@ -425,12 +595,58 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
             size_t e = edges.size();
             edges.push_back({u, w});
             out_edges[u].push_back(e);
-            in_edges[w].push_back(e);
         }
     }
     const size_t num_edges = edges.size();
-    out << ">>> ILP: " << num_edges << " arestas RR ("
-        << k * num_edges << " variáveis de fluxo)\n";
+
+    const bool bbox_enabled = env_enabled("ILP_BBOX", true);
+    const int bbox_margin = bbox_margin_from_env(out);
+    std::vector<VtrRouteData> vtr_routes = collect_vtr_routes(nets, edges, out_edges);
+    std::vector<NetDomain> domains;
+    domains.reserve(k);
+
+    size_t candidate_nodes = 0;
+    size_t candidate_edges = 0;
+    size_t fallback_nets = 0;
+    for (size_t i = 0; i < k; i++) {
+        domains.push_back(make_net_domain(nets[i], vtr_routes[i], edges,
+                                          num_nodes, bbox_enabled, bbox_margin));
+        candidate_nodes += domains.back().nodes.size();
+        candidate_edges += domains.back().edges.size();
+        if (domains.back().fallback_full_graph) fallback_nets++;
+    }
+
+    const size_t dense_nodes = k * num_nodes;
+    const size_t dense_edges = k * num_edges;
+    auto reduction = [](size_t kept, size_t dense) {
+        return dense == 0 ? 0.0 : 100.0 * (1.0 - double(kept) / double(dense));
+    };
+
+    out << "\n>>> Bounding box: " << (bbox_enabled ? "ON" : "OFF")
+        << (bbox_enabled ? " (margem " + std::to_string(bbox_margin) + " tiles)" : "")
+        << "\n";
+    if (fallback_nets > 0) {
+        out << ">>> Bounding box: " << fallback_nets
+            << " nets sem warm start verificável mantidas no grafo completo\n";
+    }
+    out << ">>> ILP: " << k << " nets, " << num_nodes << " nós RR, "
+        << num_edges << " arestas RR globais\n";
+    out << ">>> Domínio x: " << candidate_nodes << " / " << dense_nodes
+        << " variáveis (redução " << reduction(candidate_nodes, dense_nodes)
+        << " %)\n";
+    out << ">>> Domínio f: " << candidate_edges << " / " << dense_edges
+        << " variáveis (redução " << reduction(candidate_edges, dense_edges)
+        << " %)\n";
+
+    if (env_enabled("ILP_BBOX_VERBOSE", false)) {
+        for (size_t i = 0; i < k; i++) {
+            out << "    Net " << nets[i].name << ": "
+                << domains[i].nodes.size() << "/" << num_nodes << " nós, "
+                << domains[i].edges.size() << "/" << num_edges << " arestas"
+                << (domains[i].fallback_full_graph ? " [fallback completo]" : "")
+                << "\n";
+        }
+    }
 
     // Tempo de build do modelo (construção + warm start), medido separado do
     // solve para a tabela de escalabilidade — o comparativo científico usa só o
@@ -441,28 +657,31 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
     try {
         IloModel model(env);
 
-        // x[i][v] ∈ {0,1} — nó v usado pela net i
+        // x[i][local_v] ∈ {0,1} — nó global domains[i].nodes[local_v]
+        // usado pela net i. Nós ausentes do domínio estão fixados em zero.
         std::vector<IloBoolVarArray> x;
         x.reserve(k);
         for (size_t i = 0; i < k; i++) {
-            x.emplace_back(env, (IloInt)num_nodes);
+            x.emplace_back(env, (IloInt)domains[i].nodes.size());
         }
 
-        // f[i][e] ∈ [0, D_i] — fluxo single-commodity na aresta e para a net i.
-        // D_i = nº de sinks: source emite D_i unidades, cada sink consome 1.
+        // f[i][local_e] ∈ [0, D_i] — fluxo single-commodity na aresta global
+        // domains[i].edges[local_e]. D_i = nº de sinks.
         std::vector<IloNumVarArray> f;
         f.reserve(k);
         for (size_t i = 0; i < k; i++) {
             IloNum cap_flow = (IloNum)nets[i].sinks.size();
-            f.emplace_back(env, (IloInt)num_edges, 0.0, cap_flow);
+            f.emplace_back(env, (IloInt)domains[i].edges.size(), 0.0, cap_flow);
         }
 
         // Objetivo: min Σ_i Σ_v c_v · x[i][v], com c_v = base_cost(v) —
         // a componente estática do custo PathFinder (acc/pres são dinâmicas).
         IloExpr obj(env);
         for (size_t i = 0; i < k; i++) {
-            for (size_t v = 0; v < num_nodes; v++) {
-                obj += (IloNum)get_single_rr_cong_base_cost(RRNodeId(v)) * x[i][v];
+            for (size_t local = 0; local < domains[i].nodes.size(); local++) {
+                size_t node = domains[i].nodes[local];
+                obj += (IloNum)get_single_rr_cong_base_cost(RRNodeId(node))
+                       * x[i][local];
             }
         }
         model.add(IloMinimize(env, obj));
@@ -474,7 +693,8 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
         for (size_t v = 0; v < num_nodes; v++) {
             IloExpr sum(env);
             for (size_t i = 0; i < k; i++) {
-                sum += x[i][v];
+                size_t local = local_index(domains[i].nodes, v);
+                if (local != std::numeric_limits<size_t>::max()) sum += x[i][local];
             }
             model.add(sum <= (IloInt)rr_graph.node_capacity(RRNodeId(v)));
             sum.end();
@@ -490,11 +710,30 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
             std::unordered_set<size_t> sink_set(nets[i].sinks.begin(),
                                                 nets[i].sinks.end());
 
+            // Adjacência local temporária: existe somente enquanto as
+            // restrições desta net são criadas, evitando manter milhões de
+            // pequenos vetores vivos ao mesmo tempo nos circuitos grandes.
+            std::vector<size_t> node_local(
+                num_nodes, std::numeric_limits<size_t>::max());
+            for (size_t local = 0; local < domains[i].nodes.size(); local++) {
+                node_local[domains[i].nodes[local]] = local;
+            }
+            std::vector<std::vector<size_t>> local_out(domains[i].nodes.size());
+            std::vector<std::vector<size_t>> local_in(domains[i].nodes.size());
+            for (size_t local_e = 0; local_e < domains[i].edges.size(); local_e++) {
+                const Edge& edge = edges[domains[i].edges[local_e]];
+                local_out[node_local[edge.tail]].push_back(local_e);
+                local_in[node_local[edge.head]].push_back(local_e);
+            }
+
             // 2a. Conservação: (saída) − (entrada) = oferta − demanda em cada nó.
-            for (size_t v = 0; v < num_nodes; v++) {
+            for (size_t local_v = 0; local_v < domains[i].nodes.size(); local_v++) {
+                size_t v = domains[i].nodes[local_v];
                 IloExpr balance(env);
-                for (size_t e : out_edges[v]) balance += f[i][e];
-                for (size_t e : in_edges[v])  balance -= f[i][e];
+                for (size_t local_e : local_out[local_v])
+                    balance += f[i][local_e];
+                for (size_t local_e : local_in[local_v])
+                    balance -= f[i][local_e];
 
                 IloNum rhs = 0.0;
                 if (v == nets[i].source)   rhs = D;       // source emite D_i
@@ -505,17 +744,22 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
 
             // 2b. Acoplamento fluxo↔nó: aresta só conduz fluxo se ambos os
             //     extremos estão usados (x = 1).
-            for (size_t e = 0; e < num_edges; e++) {
-                model.add(f[i][e] <= D * x[i][edges[e].tail]);
-                model.add(f[i][e] <= D * x[i][edges[e].head]);
+            for (size_t local_e = 0; local_e < domains[i].edges.size(); local_e++) {
+                const Edge& edge = edges[domains[i].edges[local_e]];
+                size_t tail = node_local[edge.tail];
+                size_t head = node_local[edge.head];
+                model.add(f[i][local_e] <= D * x[i][tail]);
+                model.add(f[i][local_e] <= D * x[i][head]);
             }
         }
 
         // 3. Source e sinks obrigatórios
         for (size_t i = 0; i < k; i++) {
-            model.add(x[i][nets[i].source] == 1);
+            size_t source = local_index(domains[i].nodes, nets[i].source);
+            model.add(x[i][source] == 1);
             for (size_t t : nets[i].sinks) {
-                model.add(x[i][t] == 1);
+                size_t sink = local_index(domains[i].nodes, t);
+                model.add(x[i][sink] == 1);
             }
         }
 
@@ -527,8 +771,9 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
         // incompleto e o CPLEX poderia descartá-lo. O fluxo da árvore VTR é
         // reconstruído contando, por aresta, quantos sinks há na subárvore abaixo
         // dela (= soma das demandas que passam pela aresta no sentido source→sink).
+        double warm_start_objective = 0.0;
+        bool has_complete_warm_start = false;
         {
-            const auto& route_ctx = g_vpr_ctx.routing();
             IloNumVarArray start_vars(env);
             IloNumArray    start_vals(env);
             size_t nets_with_start = 0;
@@ -541,45 +786,59 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
             };
 
             for (size_t i = 0; i < k; i++) {
-                ParentNetId pid{size_t(nets[i].id)};
-                if (!route_ctx.route_trees[pid]) continue;
+                if (!vtr_routes[i].complete) continue;
                 nets_with_start++;
+                const VtrRouteData& route = vtr_routes[i];
 
-                std::unordered_set<size_t> used_vtr;
-                // Parent de cada nó na árvore VTR (para walkback de cada sink).
-                std::unordered_map<size_t, size_t> tree_parent;
-                for (const RouteTreeNode& node : route_ctx.route_trees[pid]->all_nodes()) {
-                    used_vtr.insert(size_t(node.inode));
-                    if (node.parent())
-                        tree_parent[size_t(node.inode)] = size_t(node.parent()->inode);
+                for (size_t node : route.used_nodes) {
+                    warm_start_objective +=
+                        get_single_rr_cong_base_cost(RRNodeId(node));
+                    if (local_index(domains[i].nodes, node)
+                        == std::numeric_limits<size_t>::max()) {
+                        throw std::runtime_error(
+                            "bounding box não preservou um nó da rota VTR");
+                    }
                 }
 
                 // Fluxo por aresta: +1 em cada aresta do caminho source→sink, por sink.
-                std::vector<double> flow(num_edges, 0.0);
+                std::vector<double> flow(domains[i].edges.size(), 0.0);
                 for (size_t t : nets[i].sinks) {
                     size_t node = t;
-                    while (node != nets[i].source && tree_parent.count(node)) {
-                        size_t par = tree_parent[node];
-                        long long e = find_edge(par, node);
-                        if (e >= 0) flow[(size_t)e] += 1.0;
+                    while (node != nets[i].source) {
+                        size_t par = route.parent.at(node);
+                        long long global_e = find_edge(par, node);
+                        if (global_e < 0) {
+                            throw std::runtime_error(
+                                "aresta da rota VTR não encontrada no RRGraph");
+                        }
+                        size_t local_e = local_index(domains[i].edges,
+                                                     size_t(global_e));
+                        if (local_e == std::numeric_limits<size_t>::max()) {
+                            throw std::runtime_error(
+                                "bounding box não preservou uma aresta da rota VTR");
+                        }
+                        flow[local_e] += 1.0;
                         node = par;
                     }
                 }
 
-                for (size_t v = 0; v < num_nodes; v++) {
-                    start_vars.add(x[i][v]);
-                    start_vals.add(used_vtr.count(v) ? 1.0 : 0.0);
+                for (size_t local = 0; local < domains[i].nodes.size(); local++) {
+                    start_vars.add(x[i][local]);
+                    start_vals.add(route.used_nodes.count(domains[i].nodes[local])
+                                       ? 1.0 : 0.0);
                 }
-                for (size_t e = 0; e < num_edges; e++) {
-                    start_vars.add(f[i][e]);
-                    start_vals.add(flow[e]);
+                for (size_t local = 0; local < domains[i].edges.size(); local++) {
+                    start_vars.add(f[i][local]);
+                    start_vals.add(flow[local]);
                 }
             }
 
             if (nets_with_start == k) {
                 cplex.addMIPStart(start_vars, start_vals);
+                has_complete_warm_start = true;
                 out << ">>> Warm start: solução VTR fornecida como MIPStart ("
-                    << nets_with_start << "/" << k << " nets)\n";
+                    << nets_with_start << "/" << k << " nets, objetivo "
+                    << warm_start_objective << ")\n";
             } else {
                 out << ">>> Warm start ignorado: apenas " << nets_with_start
                     << "/" << k << " nets têm route_tree do VTR\n";
@@ -621,7 +880,10 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
             << cplex.getMIPRelativeGap() * 100.0 << " %\n";
         out << "Nós B&B explorados               : " << cplex.getNnodes() << "\n";
         out << "Variáveis (x / f)                : "
-            << (k * num_nodes) << " / " << (k * num_edges) << "\n";
+            << candidate_nodes << " / " << candidate_edges << "\n";
+        out << "Variáveis densas evitadas (x / f): "
+            << (dense_nodes - candidate_nodes) << " / "
+            << (dense_edges - candidate_edges) << "\n";
         out << "Restrições (CPLEX getNrows)      : " << cplex.getNrows() << "\n";
         if (use_callback) {
             out << "Callback         : ON (progress)\n";
@@ -635,13 +897,27 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
         }
         out << "\n";
 
+        // Proteção de qualidade: como toda a rota VTR está no subgrafo, a
+        // solução minimizada nunca deve ser pior que o próprio warm start no
+        // objetivo da formulação. Se isso ocorrer, preservamos as route_trees
+        // originais do VTR e não exportamos a solução suspeita.
+        if (has_complete_warm_start
+            && cplex.getObjValue() > warm_start_objective + 1e-6) {
+            out << "ERRO: objetivo ILP (" << cplex.getObjValue()
+                << ") pior que o warm start VTR (" << warm_start_objective
+                << "). Rota VTR preservada; saída ILP descartada.\n";
+            env.end();
+            return;
+        }
+
         // Extrair nós usados e verificar conectividade de cada net via BFS.
         std::vector<NetBfs> net_bfs(k);
         size_t nets_ok = 0;
         for (size_t i = 0; i < k; i++) {
             std::unordered_set<size_t> used;
-            for (size_t v = 0; v < num_nodes; v++) {
-                if (cplex.getValue(x[i][v]) > 0.5) used.insert(v);
+            for (size_t local = 0; local < domains[i].nodes.size(); local++) {
+                if (cplex.getValue(x[i][local]) > 0.5)
+                    used.insert(domains[i].nodes[local]);
             }
             net_bfs[i] = bfs_selected_nodes(nets[i], used);
             size_t reached = count_reachable_sinks(nets[i], net_bfs[i]);
@@ -657,7 +933,7 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
         out << "===================================\n";
 
         if (std::getenv("ILP_DIAG") && nets_ok != k) {
-            diagnose_disconnected(out, nets, cplex, x, net_bfs, preds, num_nodes);
+            diagnose_disconnected(out, nets, cplex, x, domains, net_bfs, preds);
         }
 
         if (nets_ok != k) {
@@ -671,7 +947,7 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
         // espelhamento dos caminhos via mirror_path_to_vtr.
         auto& route_ctx = g_vpr_ctx.mutable_routing();
         for (size_t i = 0; i < k; i++) {
-            ParentNetId pid{size_t(nets[i].id)};
+            ParentNetId pid{static_cast<int>(size_t(nets[i].id))};
             if (route_ctx.route_trees[pid]) {
                 pathfinder_update_cost_from_route_tree(
                     route_ctx.route_trees[pid]->root(), -1);
@@ -690,6 +966,8 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
         print_delay_comparison(out, nets, vtr_delay, ilp_delay);
     } catch (IloException& e) {
         std::cerr << "Erro CPLEX: " << e.getMessage() << "\n";
+    } catch (const std::exception& e) {
+        std::cerr << "Erro ao construir o domínio ILP: " << e.what() << "\n";
     }
     env.end();
 }
