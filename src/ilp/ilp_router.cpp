@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -61,6 +62,9 @@ struct NetData {
 struct Edge {
     size_t tail;
     size_t head;
+    size_t rr_edge_id;
+    size_t switch_id;
+    double delay_proxy_ns;
 };
 
 // Domínio esparso de uma net. Os índices de x/f são locais, mas nodes/edges
@@ -75,6 +79,7 @@ struct NetDomain {
 struct VtrRouteData {
     std::unordered_set<size_t> used_nodes;
     std::unordered_map<size_t, size_t> parent;
+    std::unordered_map<size_t, size_t> parent_edge;
     bool complete = false;
 };
 
@@ -171,9 +176,12 @@ std::vector<VtrRouteData> collect_vtr_routes(const std::vector<NetData>& nets,
     const auto& route_ctx = g_vpr_ctx.routing();
     std::vector<VtrRouteData> routes(nets.size());
 
-    auto find_edge = [&](size_t tail, size_t head) -> size_t {
+    auto find_edge = [&](size_t tail, size_t head, size_t switch_id) -> size_t {
         for (size_t edge_id : out_edges[tail]) {
-            if (edges[edge_id].head == head) return edge_id;
+            if (edges[edge_id].head == head
+                && edges[edge_id].switch_id == switch_id) {
+                return edge_id;
+            }
         }
         return std::numeric_limits<size_t>::max();
     };
@@ -185,8 +193,15 @@ std::vector<VtrRouteData> collect_vtr_routes(const std::vector<NetData>& nets,
         VtrRouteData& route = routes[i];
         for (const RouteTreeNode& node : route_ctx.route_trees[pid]->all_nodes()) {
             route.used_nodes.insert(size_t(node.inode));
-            if (node.parent())
+            if (node.parent()) {
                 route.parent[size_t(node.inode)] = size_t(node.parent()->inode);
+                size_t edge_id = find_edge(
+                    size_t(node.parent()->inode), size_t(node.inode),
+                    size_t(node.parent_switch));
+                if (edge_id != std::numeric_limits<size_t>::max()) {
+                    route.parent_edge[size_t(node.inode)] = edge_id;
+                }
+            }
         }
 
         route.complete = route.used_nodes.count(nets[i].source) != 0;
@@ -202,7 +217,8 @@ std::vector<VtrRouteData> collect_vtr_routes(const std::vector<NetData>& nets,
                     break;
                 }
                 size_t parent = parent_it->second;
-                if (find_edge(parent, node) == std::numeric_limits<size_t>::max()) {
+                if (!route.parent_edge.count(node)
+                    || edges[route.parent_edge.at(node)].tail != parent) {
                     route.complete = false;
                     break;
                 }
@@ -261,26 +277,43 @@ struct NetBfs {
     std::unordered_map<size_t, RREdgeId> parent_edge;
 };
 
-NetBfs bfs_selected_nodes(const NetData& net, const std::unordered_set<size_t>& used) {
-    const auto& rr_graph = g_vpr_ctx.device().rr_graph;
+// BFS restrito às arestas que efetivamente carregam fluxo na solução. Isso
+// mantém a route_tree exportada alinhada ao segundo critério do objetivo, em
+// vez de escolher caminhos arbitrários no subgrafo induzido pelos nós x = 1.
+NetBfs bfs_positive_flow(const NetData& net,
+                         const NetDomain& domain,
+                         const std::vector<Edge>& edges,
+                         const IloCplex& cplex,
+                         const IloNumVarArray& flow) {
+    constexpr double flow_epsilon = 1e-7;
 
     NetBfs bfs;
     std::queue<size_t> queue;
     queue.push(net.source);
     bfs.visited.insert(net.source);
 
+    std::unordered_map<size_t, std::vector<size_t>> positive_out;
+    for (size_t local_e = 0; local_e < domain.edges.size(); local_e++) {
+        if (cplex.getValue(flow[local_e]) > flow_epsilon) {
+            size_t global_e = domain.edges[local_e];
+            positive_out[edges[global_e].tail].push_back(global_e);
+        }
+    }
+
     while (!queue.empty()) {
-        RRNodeId node(queue.front());
+        size_t node = queue.front();
         queue.pop();
-        RREdgeId first_edge = rr_graph.node_first_edge(node);
-        for (t_edge_size i = 0; i < rr_graph.num_edges(node); i++) {
-            size_t sink = size_t(rr_graph.edge_sink_node(node, i));
-            if (used.count(sink) && !bfs.visited.count(sink)) {
-                bfs.visited.insert(sink);
-                bfs.parent_node[sink] = size_t(node);
-                bfs.parent_edge[sink] = RREdgeId(size_t(first_edge) + i);
-                queue.push(sink);
-            }
+        auto out_it = positive_out.find(node);
+        if (out_it == positive_out.end()) continue;
+        for (size_t global_e : out_it->second) {
+            size_t sink = edges[global_e].head;
+            if (bfs.visited.count(sink)) continue;
+
+            bfs.visited.insert(sink);
+            bfs.parent_node[sink] = node;
+            bfs.parent_edge[sink] =
+                RREdgeId(edges[global_e].rr_edge_id);
+            queue.push(sink);
         }
     }
     return bfs;
@@ -585,15 +618,30 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
     }
 
     // Índice global de arestas dirigidas, para as variáveis de fluxo.
-    // edges[e] = {tail, head}; out_edges[v] = índices globais em `edges`.
+    // O proxy RC aproxima o incremento de Elmore local da aresta. Ele é
+    // convertido para ns para manter o segundo objetivo bem escalado.
     std::vector<Edge>                edges;
     std::vector<std::vector<size_t>> out_edges(num_nodes);
     for (RRNodeId node : rr_graph.nodes()) {
         size_t u = size_t(node);
+        RREdgeId first_edge = rr_graph.node_first_edge(node);
         for (t_edge_size i = 0; i < rr_graph.num_edges(node); i++) {
-            size_t w = size_t(rr_graph.edge_sink_node(node, i));
+            RRNodeId head = rr_graph.edge_sink_node(node, i);
+            size_t w = size_t(head);
+            RRSwitchId switch_id(rr_graph.edge_switch(node, i));
+            const t_rr_switch_inf& rr_switch =
+                rr_graph.rr_switch_inf(switch_id);
+            double head_capacitance =
+                double(rr_graph.node_C(head)) + double(rr_switch.Cinternal);
+            double delay_proxy_s =
+                double(rr_switch.Tdel)
+                + double(rr_switch.R) * head_capacitance
+                + 0.5 * double(rr_graph.node_R(head))
+                          * double(rr_graph.node_C(head));
             size_t e = edges.size();
-            edges.push_back({u, w});
+            edges.push_back({
+                u, w, size_t(first_edge) + i, size_t(switch_id),
+                delay_proxy_s * 1e9});
             out_edges[u].push_back(e);
         }
     }
@@ -674,18 +722,29 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
             f.emplace_back(env, (IloInt)domains[i].edges.size(), 0.0, cap_flow);
         }
 
-        // Objetivo: min Σ_i Σ_v c_v · x[i][v], com c_v = base_cost(v) —
-        // a componente estática do custo PathFinder (acc/pres são dinâmicas).
-        IloExpr obj(env);
+        // Objetivo lexicográfico:
+        //   1) preserva o objetivo original de congestionamento (base_cost);
+        //   2) entre soluções de mesmo custo, minimiza o proxy RC agregado dos
+        //      caminhos source→sink. Como f conta a demanda a jusante, uma
+        //      aresta compartilhada é ponderada pelo número de sinks atendidos.
+        IloExpr base_cost_obj(env);
         for (size_t i = 0; i < k; i++) {
             for (size_t local = 0; local < domains[i].nodes.size(); local++) {
                 size_t node = domains[i].nodes[local];
-                obj += (IloNum)get_single_rr_cong_base_cost(RRNodeId(node))
-                       * x[i][local];
+                base_cost_obj +=
+                    (IloNum)get_single_rr_cong_base_cost(RRNodeId(node))
+                    * x[i][local];
             }
         }
-        model.add(IloMinimize(env, obj));
-        obj.end();
+        IloExpr delay_proxy_obj(env);
+        for (size_t i = 0; i < k; i++) {
+            for (size_t local_e = 0; local_e < domains[i].edges.size(); local_e++) {
+                const Edge& edge = edges[domains[i].edges[local_e]];
+                delay_proxy_obj += edge.delay_proxy_ns * f[i][local_e];
+            }
+        }
+        model.add(IloMinimize(
+            env, IloStaticLex(env, base_cost_obj, delay_proxy_obj)));
 
         // 1. Capacidade de vértice: Σ_i x[i][v] ≤ cap(v)
         //    cap(v) vem do RRGraph: SOURCE/SINK podem ter capacidade > 1;
@@ -771,19 +830,13 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
         // incompleto e o CPLEX poderia descartá-lo. O fluxo da árvore VTR é
         // reconstruído contando, por aresta, quantos sinks há na subárvore abaixo
         // dela (= soma das demandas que passam pela aresta no sentido source→sink).
-        double warm_start_objective = 0.0;
+        double warm_start_base_cost = 0.0;
+        double warm_start_delay_proxy_ns = 0.0;
         bool has_complete_warm_start = false;
         {
             IloNumVarArray start_vars(env);
             IloNumArray    start_vals(env);
             size_t nets_with_start = 0;
-
-            // Mapa (tail,head) -> índice de aresta, para casar arestas da route_tree.
-            auto find_edge = [&](size_t tail, size_t head) -> long long {
-                for (size_t e : out_edges[tail])
-                    if (edges[e].head == head) return (long long)e;
-                return -1;
-            };
 
             for (size_t i = 0; i < k; i++) {
                 if (!vtr_routes[i].complete) continue;
@@ -791,7 +844,7 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
                 const VtrRouteData& route = vtr_routes[i];
 
                 for (size_t node : route.used_nodes) {
-                    warm_start_objective +=
+                    warm_start_base_cost +=
                         get_single_rr_cong_base_cost(RRNodeId(node));
                     if (local_index(domains[i].nodes, node)
                         == std::numeric_limits<size_t>::max()) {
@@ -806,18 +859,16 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
                     size_t node = t;
                     while (node != nets[i].source) {
                         size_t par = route.parent.at(node);
-                        long long global_e = find_edge(par, node);
-                        if (global_e < 0) {
-                            throw std::runtime_error(
-                                "aresta da rota VTR não encontrada no RRGraph");
-                        }
+                        size_t global_e = route.parent_edge.at(node);
                         size_t local_e = local_index(domains[i].edges,
-                                                     size_t(global_e));
+                                                     global_e);
                         if (local_e == std::numeric_limits<size_t>::max()) {
                             throw std::runtime_error(
                                 "bounding box não preservou uma aresta da rota VTR");
                         }
                         flow[local_e] += 1.0;
+                        warm_start_delay_proxy_ns +=
+                            edges[global_e].delay_proxy_ns;
                         node = par;
                     }
                 }
@@ -837,8 +888,9 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
                 cplex.addMIPStart(start_vars, start_vals);
                 has_complete_warm_start = true;
                 out << ">>> Warm start: solução VTR fornecida como MIPStart ("
-                    << nets_with_start << "/" << k << " nets, objetivo "
-                    << warm_start_objective << ")\n";
+                    << nets_with_start << "/" << k << " nets, base_cost "
+                    << warm_start_base_cost << ", proxy RC "
+                    << warm_start_delay_proxy_ns << " ns)\n";
             } else {
                 out << ">>> Warm start ignorado: apenas " << nets_with_start
                     << "/" << k << " nets têm route_tree do VTR\n";
@@ -874,10 +926,24 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
             return;
         }
 
-        out << "Custo total (objetivo, base_cost): " << cplex.getObjValue() << "\n";
-        out << "Melhor bound (best obj value)    : " << cplex.getBestObjValue() << "\n";
-        out << "Gap relativo (MIP)               : "
-            << cplex.getMIPRelativeGap() * 100.0 << " %\n";
+        double base_cost_value = cplex.getValue(base_cost_obj);
+        double delay_proxy_value_ns = cplex.getValue(delay_proxy_obj);
+        IloInt multiobj_solves = cplex.getMultiObjNsolves();
+        out << "Objetivo primário (base_cost)    : " << base_cost_value << "\n";
+        out << "Objetivo secundário (proxy RC)   : "
+            << delay_proxy_value_ns << " ns\n";
+        out << "Subproblemas multiobjetivo       : "
+            << multiobj_solves << "\n";
+        if (multiobj_solves > 0) {
+            double primary_bound = cplex.getMultiObjInfo(
+                IloCplex::MultiObjBestObjValue, 0);
+            double primary_gap =
+                std::abs(base_cost_value - primary_bound)
+                / std::max(1e-10, std::abs(base_cost_value));
+            out << "Melhor bound (base_cost)         : " << primary_bound << "\n";
+            out << "Gap relativo (base_cost)         : "
+                << primary_gap * 100.0 << " %\n";
+        }
         out << "Nós B&B explorados               : " << cplex.getNnodes() << "\n";
         out << "Variáveis (x / f)                : "
             << candidate_nodes << " / " << candidate_edges << "\n";
@@ -902,15 +968,16 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
         // objetivo da formulação. Se isso ocorrer, preservamos as route_trees
         // originais do VTR e não exportamos a solução suspeita.
         if (has_complete_warm_start
-            && cplex.getObjValue() > warm_start_objective + 1e-6) {
-            out << "ERRO: objetivo ILP (" << cplex.getObjValue()
-                << ") pior que o warm start VTR (" << warm_start_objective
+            && base_cost_value > warm_start_base_cost + 1e-6) {
+            out << "ERRO: base_cost ILP (" << base_cost_value
+                << ") pior que o warm start VTR (" << warm_start_base_cost
                 << "). Rota VTR preservada; saída ILP descartada.\n";
             env.end();
             return;
         }
 
-        // Extrair nós usados e verificar conectividade de cada net via BFS.
+        // Extrair nós usados e verificar conectividade nas arestas que
+        // efetivamente carregam fluxo.
         std::vector<NetBfs> net_bfs(k);
         size_t nets_ok = 0;
         for (size_t i = 0; i < k; i++) {
@@ -919,7 +986,8 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
                 if (cplex.getValue(x[i][local]) > 0.5)
                     used.insert(domains[i].nodes[local]);
             }
-            net_bfs[i] = bfs_selected_nodes(nets[i], used);
+            net_bfs[i] = bfs_positive_flow(
+                nets[i], domains[i], edges, cplex, f[i]);
             size_t reached = count_reachable_sinks(nets[i], net_bfs[i]);
             bool ok = (reached == nets[i].sinks.size());
             if (ok) nets_ok++;

@@ -52,7 +52,7 @@ set(VTR_INCLUDE_DIRS
 )
 
 # ==============================================================================
-# Libs pré-compiladas (compiladas uma única vez em vtr/build)
+# Libs pré-compiladas (compiladas uma única vez em extern/vtr/build)
 # ==============================================================================
 
 set(VTR_LIB_VPR       "${VTR_BUILD}/vpr/libvpr.a")
@@ -92,7 +92,7 @@ foreach(lib ${VTR_ALL_LIBS})
         message(FATAL_ERROR
             "Lib não encontrada: ${lib}\n"
             "Compile o VTR primeiro:\n"
-            "  cd vtr/build\n"
+            "  cd extern/vtr/build\n"
             "  make vpr librrgraph libarchfpga libvtrutil libpugiutil liblog -j$(nproc)"
         )
     endif()
