@@ -345,11 +345,24 @@ routing::PathResult walkback_path(const NetBfs& bfs, size_t source, size_t sink)
     return path;
 }
 
+// Soma os proxies RC das arestas de um caminho source->sink.
+double sum_path_proxy_ns(const routing::PathResult& path,
+                         const std::vector<double>& proxy_by_rr_edge) {
+    double sum = 0.0;
+    for (RREdgeId e : path.edges) {
+        size_t idx = static_cast<size_t>(e);
+        if (idx < proxy_by_rr_edge.size()) sum += proxy_by_rr_edge[idx];
+    }
+    return sum;
+}
+
 // Compara os delays Elmore (source→sink) dos dois roteamentos.
 void print_delay_comparison(std::ostream& out,
+                            const std::filesystem::path& csv_path,
                             const std::vector<NetData>& nets,
                             const NetPinsMatrix<float>& vtr_delay,
-                            const NetPinsMatrix<float>& ilp_delay) {
+                            const NetPinsMatrix<float>& ilp_delay,
+                            const std::vector<std::vector<double>>& proxy_per_sink) {
     out << "\n========== DELAY VTR x ILP ==========\n";
     out << std::left << std::setw(24) << "Net"
         << std::setw(16) << "VTR max (ns)"
@@ -391,6 +404,86 @@ void print_delay_comparison(std::ostream& out,
             << " | ILP " << (ilp_sum / n_sinks) * 1e9 << "\n";
     }
     out << "=====================================\n";
+
+    out << "\n========== PROXY vs ELMORE REAL (ILP) ==========\n";
+    out << std::left << std::setw(24) << "Net"
+        << std::setw(8) << "Sink"
+        << std::setw(14) << "proxy(ns)"
+        << std::setw(14) << "elmore(ns)"
+        << std::setw(14) << "abs(ns)"
+        << std::setw(12) << "rel(%)"
+        << "ratio\n";
+
+    std::ofstream csv(csv_path, std::ios::trunc);
+    if (csv.is_open()) {
+        csv << "net,sink_idx,proxy_ns,elmore_ns,abs_err_ns,rel_err_pct,ratio\n";
+    }
+
+    double sum_abs = 0.0, sum_rel_frac = 0.0;
+    double sum_x = 0.0, sum_y = 0.0, sum_x2 = 0.0, sum_y2 = 0.0, sum_xy = 0.0;
+    size_t n = 0;
+
+    out << std::fixed << std::setprecision(4);
+    for (size_t i = 0; i < nets.size(); i++) {
+        const NetData& net = nets[i];
+        ParentNetId pid{static_cast<int>(size_t(net.id))};
+        for (size_t j = 0; j < net.sinks.size(); j++) {
+            double proxy_ns = proxy_per_sink[i][j];
+            double elmore_ns = double(ilp_delay[pid][j + 1]) * 1e9;
+            double abs_err = std::fabs(proxy_ns - elmore_ns);
+            double rel_pct = (elmore_ns > 0.0)
+                                 ? (abs_err / elmore_ns * 100.0)
+                                 : std::numeric_limits<double>::infinity();
+            double ratio = (elmore_ns > 0.0)
+                               ? (proxy_ns / elmore_ns)
+                               : std::numeric_limits<double>::infinity();
+
+            out << std::left << std::setw(24) << net.name
+                << std::setw(8) << j
+                << std::setw(14) << proxy_ns
+                << std::setw(14) << elmore_ns
+                << std::setw(14) << abs_err
+                << std::setw(12) << rel_pct
+                << ratio << "\n";
+
+            if (csv.is_open()) {
+                csv << net.name << "," << j << "," << proxy_ns << ","
+                    << elmore_ns << "," << abs_err << "," << rel_pct << ","
+                    << ratio << "\n";
+            }
+
+            sum_abs += abs_err;
+            if (elmore_ns > 0.0) sum_rel_frac += abs_err / elmore_ns;
+            sum_x += proxy_ns;
+            sum_y += elmore_ns;
+            sum_x2 += proxy_ns * proxy_ns;
+            sum_y2 += elmore_ns * elmore_ns;
+            sum_xy += proxy_ns * elmore_ns;
+            n++;
+        }
+    }
+
+    out << "-------------------------------------\n";
+    out << "Sinks analisados: " << n << "\n";
+    if (n > 0) {
+        out << "MAE  (ns)       : " << (sum_abs / n) << "\n";
+        out << "MAPE (%)        : " << (sum_rel_frac / n * 100.0) << "\n";
+        double num = double(n) * sum_xy - sum_x * sum_y;
+        double den2 = (double(n) * sum_x2 - sum_x * sum_x) *
+                      (double(n) * sum_y2 - sum_y * sum_y);
+        if (den2 > 0.0) {
+            out << "Correlacao Pearson: " << (num / std::sqrt(den2)) << "\n";
+        } else {
+            out << "Correlacao Pearson: n/a\n";
+        }
+    }
+    out << "=====================================\n";
+    if (csv.is_open()) {
+        out << "[proxy] CSV salvo em: " << csv_path << "\n";
+    } else {
+        out << "[proxy] aviso: nao foi possivel salvar CSV em " << csv_path
+            << "\n";
+    }
 }
 
 // Procura um ciclo no subgrafo induzido por `used` (arestas com origem e destino
@@ -586,6 +679,7 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
                                     cfg.circuit_name /
                                     std::to_string(cfg.time_limit) /
                                     cfg.w_label;
+    std::filesystem::path csv_path = out_dir / "proxy_vs_elmore.csv";
     std::error_code ec;
     std::filesystem::create_directories(out_dir, ec);
     if (ec) {
@@ -605,6 +699,7 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
     // Delay do roteamento VTR — route_trees ainda intactas do vpr_route_flow.
     NetPinsMatrix<float> vtr_delay = make_net_pins_matrix<float>((const Netlist<>&)nlist);
     load_net_delay_from_routing((const Netlist<>&)nlist, vtr_delay);
+    out << "[elmore] computed via VTR load_net_delay_from_routing()\n";
 
     std::vector<NetData> nets = collect_nets();
     const size_t k = nets.size();
@@ -620,6 +715,8 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
     // Índice global de arestas dirigidas, para as variáveis de fluxo.
     // O proxy RC aproxima o incremento de Elmore local da aresta. Ele é
     // convertido para ns para manter o segundo objetivo bem escalado.
+    out << "[proxy] precomputing edge delays "
+           "(Tdel + R*Chead + 0.5*Rhead*Chead) ...\n";
     std::vector<Edge>                edges;
     std::vector<std::vector<size_t>> out_edges(num_nodes);
     for (RRNodeId node : rr_graph.nodes()) {
@@ -646,6 +743,10 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
         }
     }
     const size_t num_edges = edges.size();
+    std::vector<double> proxy_by_rr_edge(num_edges, 0.0);
+    for (const Edge& e : edges) {
+        proxy_by_rr_edge[e.rr_edge_id] = e.delay_proxy_ns;
+    }
 
     const bool bbox_enabled = env_enabled("ILP_BBOX", true);
     const int bbox_margin = bbox_margin_from_env(out);
@@ -1014,6 +1115,7 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
         // (nets fora do ILP mantêm a tree do VTR para o load_net_delay) e
         // espelhamento dos caminhos via mirror_path_to_vtr.
         auto& route_ctx = g_vpr_ctx.mutable_routing();
+        std::vector<std::vector<double>> proxy_per_sink(k);
         for (size_t i = 0; i < k; i++) {
             ParentNetId pid{static_cast<int>(size_t(nets[i].id))};
             if (route_ctx.route_trees[pid]) {
@@ -1021,17 +1123,21 @@ void run_ilp_routing(const IlpRunConfig& cfg) {
                     route_ctx.route_trees[pid]->root(), -1);
                 route_ctx.route_trees[pid] = vtr::nullopt;
             }
+            proxy_per_sink[i].resize(nets[i].sinks.size());
             for (size_t j = 0; j < nets[i].sinks.size(); j++) {
                 routing::PathResult path =
                     walkback_path(net_bfs[i], nets[i].source, nets[i].sinks[j]);
+                proxy_per_sink[i][j] = sum_path_proxy_ns(path, proxy_by_rr_edge);
                 routing::mirror_path_to_vtr(pid, /*sink_pin_index=*/(int)(j + 1), path);
             }
         }
 
         NetPinsMatrix<float> ilp_delay = make_net_pins_matrix<float>((const Netlist<>&)nlist);
         load_net_delay_from_routing((const Netlist<>&)nlist, ilp_delay);
+        out << "[elmore] computed via VTR load_net_delay_from_routing()\n";
 
-        print_delay_comparison(out, nets, vtr_delay, ilp_delay);
+        print_delay_comparison(out, csv_path, nets, vtr_delay, ilp_delay,
+                               proxy_per_sink);
     } catch (IloException& e) {
         std::cerr << "Erro CPLEX: " << e.getMessage() << "\n";
     } catch (const std::exception& e) {

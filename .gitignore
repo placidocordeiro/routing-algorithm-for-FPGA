@@ -57,9 +57,14 @@ cmake-build-*/
 .idea/
 .claude/
 .claudeignore
+.opencode/
 *.swp
 *.swo
 *~
+
+# AI context (local only)
+AGENTS.md
+contextos/
 
 # OS
 .DS_Store
